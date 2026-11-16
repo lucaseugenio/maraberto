@@ -295,8 +295,8 @@ input[type=date].input,input[type=number].input{padding-block:8px}
     </button>
   </div>
   <div class="projtabs">
-    <button class="ptab active"><span class="t-emoji">🌊</span> Financeiro</button>
-    <button class="ptab ghost" title="As próximas abas do Mar Aberto virão depois">+ novas abas em breve</button>
+    <button class="ptab active" data-frente="financeiro"><span class="t-emoji">🌊</span> Financeiro</button>
+    <button class="ptab" data-frente="racoes"><span class="t-emoji">🐾</span> Rações</button>
   </div>
 </header>
 
@@ -409,9 +409,9 @@ const CATS_SEED=[
 
 /* ---- estado ---- */
 const LS_KEY='marAberto_v1';
-let S={contas:[],cartoes:[],categorias:[],lancamentos:[],settings:{membros:['Eu','Esposa','Filha'],logo:null},ui:{aba:'resumo'}};
-function persistLocal(){try{localStorage.setItem(LS_KEY,JSON.stringify({contas:S.contas,cartoes:S.cartoes,categorias:S.categorias,lancamentos:S.lancamentos,settings:S.settings}));}catch(e){console.warn('localStorage cheio/indisponível',e);}}
-function loadLocal(){try{const d=JSON.parse(localStorage.getItem(LS_KEY)||'null');if(d){S.contas=d.contas||[];S.cartoes=d.cartoes||[];S.categorias=d.categorias||[];S.lancamentos=d.lancamentos||[];S.settings=Object.assign({membros:['Eu','Esposa','Filha'],logo:null},d.settings||{});}}catch(e){console.warn('dados locais corrompidos',e);}}
+let S={contas:[],cartoes:[],categorias:[],lancamentos:[],racoes:[],settings:{membros:['Eu','Esposa','Filha'],logo:null},ui:{aba:'resumo',frente:'financeiro',racaoView:'gantt'}};
+function persistLocal(){try{localStorage.setItem(LS_KEY,JSON.stringify({contas:S.contas,cartoes:S.cartoes,categorias:S.categorias,lancamentos:S.lancamentos,racoes:S.racoes,settings:S.settings}));}catch(e){console.warn('localStorage cheio/indisponível',e);}}
+function loadLocal(){try{const d=JSON.parse(localStorage.getItem(LS_KEY)||'null');if(d){S.contas=d.contas||[];S.cartoes=d.cartoes||[];S.categorias=d.categorias||[];S.lancamentos=d.lancamentos||[];S.racoes=d.racoes||[];S.settings=Object.assign({membros:['Eu','Esposa','Filha'],logo:null},d.settings||{});}}catch(e){console.warn('dados locais corrompidos',e);}}
 
 /* ---- Supabase (REST direto, sem dependências) ---- */
 /* SUPABASE_PRESET é injetado no build (src/supabase_config.json) quando o usuário
@@ -439,23 +439,28 @@ const SB={
   upsert(c,t,rows){return this.req(c,'POST',t+'?on_conflict=id',rows,'resolution=merge-duplicates');},
   async ping(c){const r=await fetch(c.url.replace(/\/+$/,'')+'/rest/v1/contas?select=id&limit=1',{headers:{apikey:c.key,Authorization:'Bearer '+c.key}});if(!r.ok)throw new Error('HTTP '+r.status);return true;}
 };
-const TABLES=['contas','cartoes','categorias','lancamentos'];
+const TABLES=['contas','cartoes','categorias','lancamentos','racoes'];
 function cleanRow(o){const{...rest}=o;delete rest._local;return rest;}
 async function syncRemoto(fn,okMsg){const c=SB.cfg();if(!c)return;try{await fn(c);}catch(e){console.warn(e);toast('⚠️ Salvo localmente, mas falhou no Supabase: '+e.message,'warn',4200);}}
 async function pullRemoto(){
   const c=SB.cfg();if(!c)return;
   const dados={};
-  for(const t of TABLES)dados[t]=await SB.list(c,t)||[];
+  for(const t of TABLES){try{dados[t]=await SB.list(c,t)||[];}catch(e){
+    // tabela ainda não criada (ex.: racoes antes da migração) → segue com vazio
+    dados[t]=[];if(t==='racoes')setTimeout(()=>toast('⚠️ Aba Rações: rode a migração no Supabase para sincronizar (⚙️ Configurações → Ver migração)','warn',6000),1200);}}
   const localAntes={};for(const t of TABLES)localAntes[t]=S[t]||[];
   // normaliza (numeric volta como string via PostgREST)
   S.contas=dados.contas.map(r=>({...r,saldoInicial:r2(r.saldoInicial),meta:r.meta==null?null:r2(r.meta)}));
   S.cartoes=dados.cartoes.map(r=>({...r,tipo:r.tipo||'credito',diaFechamento:+r.diaFechamento||20,diaVencimento:+r.diaVencimento||5,limite:r.limite==null?null:r2(r.limite),saldoInicial:r2(r.saldoInicial||0)}));
   S.categorias=dados.categorias.map(r=>({...r}));
   S.lancamentos=dados.lancamentos.map(r=>({...r,valor:r2(r.valor),pago:!!r.pago}));
+  S.racoes=(dados.racoes||[]).map(r=>({...r,kg:r2(r.kg||0),kgRestante:(r.kgRestante==null||r.kgRestante==='')?null:r2(r.kgRestante),custoTotal:(r.custoTotal==null||r.custoTotal==='')?null:r2(r.custoTotal),especie:r.especie||'gatos'}));
   // migração: tabela remota vazia + dados locais → envia (e mantém os dados na tela)
   let migrou=false;
   for(const t of TABLES){
-    if((dados[t]||[]).length===0&&localAntes[t].length){await SB.upsert(c,t,localAntes[t].map(cleanRow));S[t]=localAntes[t];migrou=true;}}
+    if((dados[t]||[]).length===0&&localAntes[t].length){
+      try{await SB.upsert(c,t,localAntes[t].map(cleanRow));S[t]=localAntes[t];migrou=true;}
+      catch(e){console.warn('migração falhou em '+t,e);}}}
   if(migrou)toast('📦 Dados locais enviados para o Supabase','ok');
   persistLocal();
 }
@@ -472,6 +477,31 @@ function toast(msg,tipo='',ms=2600){const el=document.createElement('div');el.cl
 const contaById=id=>S.contas.find(c=>c.id===id);
 const cartaoById=id=>S.cartoes.find(c=>c.id===id);
 const catById=id=>S.categorias.find(c=>c.id===id);
+const lancamentoById=id=>S.lancamentos.find(l=>l.id===id);
+const racaoById=id=>S.racoes.find(r=>r.id===id);
+
+/* ---- Rações (proteção animal) ---- */
+const ESPECIES=[{k:'gatos',n:'Gatos',e:'🐱',cor:'#5C93A6'},{k:'caes',n:'Cães',e:'🐶',cor:'#E09A85'},{k:'coelhos',n:'Coelhos',e:'🐰',cor:'#A9A3D8'}];
+const espBy=k=>ESPECIES.find(x=>x.k===k)||ESPECIES[0];
+function racaoDias(a,b){return Math.max(1,Math.round((parseISO(b).getTime()-parseISO(a).getTime())/864e5)+1);}
+function racaoFimEfetivo(r){return r.fim||todayISO();}
+/* kg já consumidos: ração acabada = kg total; em uso com pesagem = kg − restante; sem pesagem = null (só estimativa) */
+function racaoConsumidoKg(r){if(r.fim)return r2(r.kg);if(r.kgRestante!=null)return Math.max(0,r2(r.kg-(r.kgRestante||0)));return null;}
+/* kg/dia para gráficos: acabada = total/dias; em uso = consumido (ou total, se sem pesagem) espalhado até hoje */
+function racaoKgDia(r){
+  if(r.fim)return r2(r.kg/racaoDias(r.abertura,r.fim));
+  const cons=r.kgRestante!=null?Math.max(0,r2(r.kg-(r.kgRestante||0))):r.kg;
+  return r2(cons/racaoDias(r.abertura,todayISO()));}
+function racaoCusto(r){if(r.lancamentoId){const l=lancamentoById(r.lancamentoId);if(l)return l.valor;}return r2(r.custoTotal||0);}
+function racaoCustoKg(r){const c=racaoCusto(r);return (c>0&&r.kg>0)?r2(c/r.kg):null;}
+/* consumo estimado por mês: cada ração espalha kg/dia nos dias que o mês e a ração compartilham */
+function racoesMensal(mkList){return mkList.map(mk=>{const mFim=monthEndISO(mk+'-01'),mIni=mk+'-01';
+  let kg=0,custo=0,n=0;
+  for(const r of S.racoes){const fe=racaoFimEfetivo(r);
+    const ini=r.abertura>mIni?r.abertura:mIni;const fim=fe<mFim?fe:mFim;
+    if(ini>fim)continue;kg+=racaoKgDia(r)*racaoDias(ini,fim);
+    if(monthKey(r.abertura)===mk){custo+=racaoCusto(r);n++;}}
+  return{mk,kg:r2(kg),custo:r2(custo),n};});}
 
 /* ============ cálculos ============ */
 /* Lançamentos: tipo 'receita' | 'despesa' | 'pagamento_cartao' | 'carga_cartao'.
@@ -580,10 +610,11 @@ function srcChip(l){if(l.tipo==='pagamento_cartao'){const k=cartaoById(l.cartaoI
 function titularChip(l){if(!l.titular)return'';return `<span class="chip tit-chip">👤 ${esc(l.titular)}</span>`;}
 function valorSpan(l){const pos=l.tipo==='receita'||l.tipo==='carga_cartao';return `<span class="valor ${pos?'vpos':'vneg'}">${pos?'+':'−'} ${brl(l.valor)}</span>`;}
 function lanRow(l){const fut=l.data>todayISO();const d=parseISO(l.data);
+  const rac=S.racoes.find(r=>r.lancamentoId===l.id);
   return `<div class="lan-row ${fut?'fut':''}">
     <div class="data">${d.getDate()}<small>${MESES[d.getMonth()]}</small></div>
     <div class="desc"><b>${esc(l.descricao)}</b>
-      <div class="meta-line">${catChip(catById(l.categoriaId))}${srcChip(l)}${titularChip(l)}
+      <div class="meta-line">${catChip(catById(l.categoriaId))}${srcChip(l)}${titularChip(l)}${rac?`<span class="chip" style="background:var(--lilac-soft);color:#6F69A5" title="Compra vinculada à ração">🐾 ${esc(rac.nome)}</span>`:''}
         ${l.tipo==='carga_cartao'?'<span class="pill-soft st-carga">carga de cartão</span>':''}${l.tipo==='pagamento_cartao'?'<span class="pill-soft st-pago">pagamento de fatura</span>':(l.pago?'<span class="pill-soft st-pago">pago</span>':'<span class="pill-soft st-agend">agendado</span>')}
       </div></div>
     <div class="ops">${l.tipo==='pagamento_cartao'?'':`<button class="iconbtn" data-edit="${l.id}" title="Editar">${ic('pencil')}</button>`}<button class="iconbtn del" data-del="${l.id}" title="Excluir">${ic('trash')}</button></div>
@@ -630,9 +661,13 @@ function lineSVG(pts,H=200){if(pts.length<2)return'';const vals=pts.map(p=>p.v);
 
 /* ---- navegação ---- */
 function goAba(aba){S.ui.aba=aba;$$('.snav').forEach(b=>b.classList.toggle('active',b.dataset.aba===aba));render();}
+function goFrente(f){S.ui.frente=f;$$('.ptab[data-frente]').forEach(b=>b.classList.toggle('active',b.dataset.frente===f));render();}
 function render(){
   renderBrand();updateDbPill();updateNavBadges();
   const v=$('#view');v.innerHTML='';
+  const secNav=$('#secNav');
+  if(S.ui.frente==='racoes'){if(secNav)secNav.style.display='none';renderRacoes(v);return;}
+  if(secNav)secNav.style.display='';
   ({resumo:renderResumo,lancamentos:renderLancamentos,contas:renderContas,cartoes:renderCartoes,categorias:renderCategorias,projecao:renderProjecao,relatorios:renderRelatorios}[S.ui.aba]||renderResumo)(v);
 }
 let _favCache='';
@@ -647,7 +682,8 @@ function updateNavBadges(){
   const lanFut=S.lancamentos.filter(l=>l.data>todayISO()).length;
   const lant=$('.snav[data-aba="lancamentos"]');if(lant)lant.innerHTML=`🧾 Lançamentos${lanFut?` <span class="badge">${lanFut} futuros</span>`:''}`;
   const ct=$('.snav[data-aba="contas"]');if(ct)ct.innerHTML=`🏦 Contas${S.contas.length?` <span class="badge">${S.contas.length}</span>`:''}`;
-  const ck=$('.snav[data-aba="cartoes"]');if(ck)ck.innerHTML=`💳 Cartões${S.cartoes.length?` <span class="badge">${S.cartoes.length}</span>`:''}`;}
+  const ck=$('.snav[data-aba="cartoes"]');if(ck)ck.innerHTML=`💳 Cartões${S.cartoes.length?` <span class="badge">${S.cartoes.length}</span>`:''}`;
+  const rk=$('.ptab[data-frente="racoes"]');if(rk)rk.innerHTML=`<span class="t-emoji">🐾</span> Rações${S.racoes.length?` <span class="badge">${S.racoes.length}</span>`:''}`;}
 
 function secHead(titulo,desc,actions=''){return `<div class="sechead"><div><h1>${titulo}</h1>${desc?`<div class="desc">${desc}</div>`:''}</div><div class="actions">${actions}</div></div>`;}
 function kpi(classe,icon,lbl,val,sub){return `<div class="kpi ${classe}"><div class="wash"></div><div class="lbl">${icon} ${lbl}</div><div class="val">${val}</div>${sub?`<div class="sub">${sub}</div>`:''}</div>`;}
@@ -1066,6 +1102,204 @@ function renderRelatorios(v){
 }
 
 
+/* ============ FRENTE RAÇÕES (proteção animal) ============
+   Cada ração = um saco/embalagem: nome, espécie, kg, data de abertura e fim.
+   Em uso = saco aberto ainda (fim vazio); pode registrar o peso na balança para refinar.
+   O custo vem do lançamento de compra vinculado (Financeiro) ou do custo manual. */
+function fmtKg(kg){return (kg==null?'—':kg.toLocaleString('pt-BR',{maximumFractionDigits:1}))+' kg';}
+function ultimosMk(n){const d=parseISO(todayISO());const out=[];for(let i=n-1;i>=0;i--){const dd=new Date(d.getFullYear(),d.getMonth()-i,1);out.push(monthKey(toISO(dd)));}return out;}
+
+function renderRacoes(v){
+  const emUso=S.racoes.filter(r=>!r.fim);
+  const mk=monthKey(todayISO());const mes=racoesMensal([mk])[0];
+  const custoTotal=S.racoes.reduce((s,r)=>s+racaoCusto(r),0);
+  const estoque=S.racoes.reduce((s,r)=>s+(r.kgRestante!=null?Math.max(0,r2(r.kg-(r.kgRestante||0))):0),0);
+  const views=[['gantt','🗺️ Gantt'],['mensal','📊 Consumo mensal'],['especies','🐾 Por espécie'],['lista','📋 Todas']];
+  const semDados=!S.racoes.length;
+  v.innerHTML=`${secHead('🐾 Rações','Acompanhamento do consumo das rações da proteção animal — gatos, cães e coelhos: quando cada saco abriu, quanto dura e quanto custa.',
+    `<button class="btn btn-primary" data-newracao>${ic('plus')} Nova ração</button>`)}
+  ${semDados?`<div class="note" style="margin-bottom:16px">🐾 Bem-vindo à frente Rações! Cadastre cada saco com <b>nome, espécie, kg e a data de abertura</b> — e vincule a compra no Financeiro para acompanhar o custo. Ou <button class="btn btn-sm btn-soft" data-racaodemo>✨ Criar rações de exemplo</button></div>`:''}
+  <div class="kpis">
+    ${kpi('t-green','🐾','Rações em uso',String(emUso.length),emUso.length?emUso.map(r=>`${espBy(r.especie).e} ${esc(r.nome)}`).join(' · '):'nenhuma aberta agora')}
+    ${kpi('t-teal','🥣','Consumo do mês (est.)',fmtKg(mes.kg),semDados?'cadastre rações para ver':'estimativa distribuída pelos dias de uso')}
+    ${kpi('t-coral','💰','Custo das rações',custoTotal>0?brl(custoTotal):'—',`compras vinculadas ou custo manual${mes.custo>0?` · ${brl(mes.custo)} este mês`:''}`)}
+    ${kpi('t-amber','📦','Estoque pesado',estoque>0?fmtKg(estoque):'—','kg restantes nas pesagens registradas')}
+  </div>
+  <div class="seg" id="segRacaoView" style="margin-bottom:16px">${views.map(([k,n])=>`<button type="button" data-v="${k}" class="${(S.ui.racaoView||'gantt')===k?'on':''}">${n}</button>`).join('')}</div>
+  <div id="racaoView">${({gantt:ganttRacoes,mensal:mensalRacoes,especies:especiesRacoes,lista:listaRacoes})[S.ui.racaoView||'gantt']()}</div>`;
+  v.querySelectorAll('#segRacaoView [data-v]').forEach(b=>b.onclick=()=>{S.ui.racaoView=b.dataset.v;render();});
+  v.querySelectorAll('[data-newracao]').forEach(b=>b.onclick=()=>formRacao());
+  v.querySelectorAll('[data-editracao]').forEach(b=>b.onclick=()=>{const r=racaoById(b.dataset.editracao);if(r)formRacao(r);});
+  v.querySelectorAll('[data-delracao]').forEach(b=>b.onclick=async()=>{
+    const r=racaoById(b.dataset.delracao);if(!r)return;
+    if(await confirmAcao('Excluir ração?',`<b>${esc(r.nome)}</b> · ${fmtKg(r.kg)} · aberta ${fmtDataCurta(r.abertura)}`,'Excluir')){
+      delLocal('racoes',r.id);toast('Ração excluída','ok');render();}});
+  v.querySelectorAll('[data-racaodemo]').forEach(b=>b.onclick=()=>racoesDemo());
+}
+
+/* ---- Gantt: cada ração é uma barra da abertura ao fim (em uso vai até hoje) ---- */
+function ganttRacoes(){
+  const rows=[...S.racoes].sort((a,b)=>a.abertura<b.abertura?-1:1);
+  if(!rows.length)return `<div class="card"><div class="empty" style="padding:22px"><span class="em">🗺️</span><b>Sem rações ainda</b>Cadastre a primeira ração para ver a linha do tempo do consumo.</div></div>`;
+  const hoje=todayISO();
+  const t0=rows.reduce((m,r)=>r.abertura<m?r.abertura:m,hoje).slice(0,7)+'-01';
+  const t1raw=rows.reduce((m,r)=>{const f=racaoFimEfetivo(r);return f>m?f:m;},hoje);
+  const t1=monthEndISO(t1raw);
+  const d0=parseISO(t0).getTime(),d1=parseISO(t1).getTime()+864e5;const span=Math.max(1,d1-d0);
+  const ms=[];let y=+t0.slice(0,4),m=+t0.slice(5,7);const fim=+t1.slice(0,4)*100+ +t1.slice(5,7);
+  while(y*100+m<=fim){ms.push(`${y}-${String(m).padStart(2,'0')}`);m++;if(m>12){m=1;y++;}}
+  const diasMes=mk=>racaoDias(mk+'-01',monthEndISO(mk+'-01'));
+  const head=`<div style="display:flex;min-width:640px;border-bottom:1px solid var(--line)">
+    <div style="width:150px;min-width:150px"></div>
+    <div style="flex:1;display:flex">${ms.map(mk=>`<div style="flex:${diasMes(mk)};text-align:center;font-size:.72rem;font-weight:800;color:var(--ink-faint);border-left:1px solid var(--line-soft);padding:4px 0">${fmtMes(mk)}</div>`).join('')}</div></div>`;
+  const xHoje=(parseISO(hoje).getTime()+864e5-d0)/span*100;
+  const linhaHoje=(xHoje>0&&xHoje<100)?`<div style="position:absolute;top:0;bottom:0;left:${xHoje}%;width:2px;background:var(--coral);opacity:.55;pointer-events:none" title="hoje"></div>`:'';
+  const body=rows.map(r=>{const esp=espBy(r.especie);const fe=racaoFimEfetivo(r);
+    const left=(parseISO(r.abertura).getTime()-d0)/span*100;
+    const width=(parseISO(fe).getTime()+864e5-parseISO(r.abertura).getTime())/span*100;
+    const kgd=racaoKgDia(r);
+    return `<div style="display:flex;align-items:center;min-width:640px;border-top:1px dashed var(--line-soft)">
+      <div style="width:150px;min-width:150px;font-size:.8rem;font-weight:800;padding:7px 8px 7px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(r.nome)}">${esp.e} ${esc(r.nome)}</div>
+      <div style="flex:1;position:relative;height:42px">
+        ${linhaHoje}
+        <div style="position:absolute;left:${left}%;width:${Math.max(width,.6)}%;top:7px;bottom:7px;background:linear-gradient(100deg,${esp.cor},${esp.cor}b3);border-radius:9px;color:#fff;font-size:.72rem;font-weight:800;display:flex;align-items:center;padding:0 9px;white-space:nowrap;overflow:hidden;box-shadow:var(--shadow);${r.fim?'':'border-right:3px dashed rgba(255,255,255,.92)'}" title="${esc(r.nome)} · ${fmtKg(r.kg)} · ${r.fim?'finalizada':'em uso'}${kgd!=null?` · ~${fmtKg(kgd)}/dia`:''}">${esc(r.nome)} · ${fmtKg(r.kg)}${r.fim?'':' · em uso'}</div>
+      </div></div>`;}).join('');
+  return `<div class="card"><div class="card-h"><h3>🗺️ Linha do tempo (Gantt)</h3><span class="hint">cada barra é uma ração — da abertura ao fim</span></div>
+    <div style="overflow-x:auto">${head}${body}</div>
+    <div class="hint" style="margin-top:8px">A linha coral é hoje. Barra com borda tracejada = ração ainda em uso. Em um celular, arraste para o lado.</div></div>`;
+}
+
+/* ---- consumo mensal estimado (últimos 6 meses) ---- */
+function mensalRacoes(){
+  if(!S.racoes.length)return `<div class="card"><div class="empty" style="padding:22px"><span class="em">📊</span><b>Sem rações ainda</b></div></div>`;
+  const dados=racoesMensal(ultimosMk(6));const max=Math.max(...dados.map(d=>d.kg),1);
+  return `<div class="card"><div class="card-h"><h3>📊 Consumo por mês (estimado)</h3><span class="hint">kg distribuídos nos dias de uso</span></div>
+    <div style="display:flex;align-items:flex-end;gap:10px;height:190px;padding:6px 4px 0">
+      ${dados.map(d=>{const h=Math.max(Math.round(d.kg/max*130),d.kg>0?6:2);
+        return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%">
+          <b style="font-size:.78rem;color:var(--ink-soft)">${d.kg>0?fmtKg(d.kg):'—'}</b>
+          <div style="width:70%;max-width:64px;height:${h}px;background:linear-gradient(180deg,var(--teal),var(--teal-deep));border-radius:8px 8px 4px 4px;opacity:.92"></div>
+        </div>`;}).join('')}
+    </div>
+    <div style="display:flex;gap:10px;border-top:1px solid var(--line-soft);margin-top:8px;padding:8px 4px 2px">
+      ${dados.map(d=>`<div style="flex:1;text-align:center"><div style="font-size:.74rem;font-weight:800;color:var(--ink-faint)">${fmtMes(d.mk)}</div><div style="font-size:.7rem;color:var(--ink-faint)">${d.custo>0?brl(d.custo)+' em compras':'sem compras'}</div></div>`).join('')}
+    </div>
+    <div class="hint" style="margin-top:8px">Rações em uso sem pesagem: o kg total é espalhado da abertura até hoje — registre o ⚖️ peso atual na ração para ficar mais preciso.</div></div>`;
+}
+
+/* ---- resumo por espécie ---- */
+function especiesRacoes(){
+  if(!S.racoes.length)return `<div class="card"><div class="empty" style="padding:22px"><span class="em">🐾</span><b>Sem rações ainda</b></div></div>`;
+  return `<div class="card"><div class="card-h"><h3>🐾 Por espécie</h3><span class="hint">tudo o que já passou pelas tigelas</span></div>
+    <div class="cols" style="grid-template-columns:repeat(auto-fit,minmax(210px,1fr))">
+    ${ESPECIES.map(esp=>{const rs=S.racoes.filter(r=>(r.especie||'gatos')===esp.k);
+      const kg=rs.reduce((s,r)=>s+(racaoConsumidoKg(r)!=null?racaoConsumidoKg(r):r.kg),0);
+      const custo=rs.reduce((s,r)=>s+racaoCusto(r),0);
+      const kgTot=rs.reduce((s,r)=>s+r.kg,0);
+      return `<div style="background:${hexSoft(esp.cor,.13)};border-radius:14px;padding:14px">
+        <div style="font-weight:900;color:var(--ink)">${esp.e} ${esp.n}</div>
+        <div style="font-size:.8rem;color:var(--ink-soft);margin:4px 0 8px">${rs.length} ração(ões) · ${rs.filter(r=>!r.fim).length} em uso</div>
+        <div style="font-size:.82rem;line-height:1.75">
+          <div>Consumido: <b>${fmtKg(kg)}</b></div>
+          <div>Custo das compras: <b>${custo>0?brl(custo):'—'}</b></div>
+          <div>Custo médio: <b>${kgTot>0&&custo>0?brl(r2(custo/kgTot))+'/kg':'—'}</b></div>
+        </div></div>`;}).join('')}</div></div>`;
+}
+
+/* ---- lista completa ---- */
+function listaRacoes(){
+  if(!S.racoes.length)return `<div class="card"><div class="empty" style="padding:22px"><span class="em">📋</span><b>Sem rações ainda</b></div></div>`;
+  const rows=[...S.racoes].sort((a,b)=>b.abertura<a.abertura?-1:1);
+  return `<div class="card"><div class="card-h"><h3>📋 Todas as rações</h3><span class="hint">${S.racoes.length} no total</span></div>
+  ${rows.map(r=>{const esp=espBy(r.especie);const emUso=!r.fim;const kgd=racaoKgDia(r);const cons=racaoConsumidoKg(r);
+    return `<div class="lan-row">
+      <div class="data" style="background:${hexSoft(esp.cor,.16)}">${esp.e}<small>${esp.n}</small></div>
+      <div class="desc"><b>${esc(r.nome)}</b>
+        <div class="meta-line"><span class="chip" style="background:var(--line-soft)">${fmtKg(r.kg)}</span>
+          <span class="chip" style="background:var(--line-soft)">aberta ${fmtDataCurta(r.abertura)}${r.fim?' · acabou '+fmtDataCurta(r.fim):` · em uso há ${racaoDias(r.abertura,todayISO())} dias`}</span>
+          ${kgd!=null?`<span class="chip" style="background:var(--line-soft)">~${fmtKg(kgd)}/dia</span>`:''}
+          ${cons!=null?`<span class="chip" style="background:var(--line-soft)">consumido ${fmtKg(cons)}</span>`:''}
+          ${r.kgRestante!=null?`<span class="chip" style="background:var(--amber-soft);color:#8a6d2f">⚖️ resto ${fmtKg(r.kgRestante)}</span>`:''}
+          ${racaoCusto(r)>0?`<span class="chip" style="background:var(--green-soft);color:var(--green-deep)">💰 ${brl(racaoCusto(r))}${racaoCustoKg(r)?` · ${brl(racaoCustoKg(r))}/kg`:''}${r.lancamentoId?' · vinculada':''}</span>`:''}
+          ${r.observacoes?`<span class="muted">${esc(r.observacoes)}</span>`:''}
+        </div></div>
+      <div class="ops"><button class="iconbtn" data-editracao="${r.id}" title="Editar">${ic('pencil')}</button><button class="iconbtn del" data-delracao="${r.id}" title="Excluir">${ic('trash')}</button></div>
+      <span class="valor" style="font-size:.78rem;color:${emUso?'var(--teal-deep)':'var(--ink-faint)'};white-space:nowrap">${emUso?'em uso':'acabou'}</span></div>`;}).join('')}</div>`;
+}
+
+/* ---- form ração ---- */
+function formRacao(l){
+  const novo=!l;const r=l||{};
+  const despesas=[...S.lancamentos].filter(x=>x.tipo==='despesa').sort((a,b)=>b.data<a.data?1:-1).slice(0,40);
+  const usados=new Set(S.racoes.filter(x=>x.id!==r.id).map(x=>x.lancamentoId).filter(Boolean));
+  const opts=despesas.filter(x=>!usados.has(x.id));
+  let curEsp=r.especie||'gatos';
+  openModal(`<div class="modal-h"><h2>${novo?'🐾 Nova ração':'✏️ Editar ração'}</h2><button class="iconbtn" onclick="closeModal()">${ic('x')}</button></div>
+  <div class="field"><label>Nome <span class="opt">(marca + embalagem, ex.: “Golden Gatos 10,1 kg”)</span></label><input class="input" id="rNome" value="${esc(r.nome||'')}" placeholder="ex.: Golden Gatos 10,1 kg"></div>
+  <div class="frow">
+    <div class="field"><label>Espécie</label><div class="seg" id="segEsp">${ESPECIES.map(e=>`<button type="button" data-e="${e.k}" class="${curEsp===e.k?'on':''}">${e.e} ${e.n}</button>`).join('')}</div></div>
+    <div class="field"><label>Quantidade (kg)</label><input class="input" id="rKg" inputmode="decimal" placeholder="0,0" value="${r.kg!=null?String(r.kg).replace('.',','):''}"></div>
+  </div>
+  <div class="frow">
+    <div class="field"><label>Data de abertura</label><input type="date" class="input" id="rAbertura" value="${r.abertura||todayISO()}"></div>
+    <div class="field" id="rFimWrap" style="${r.fim?'':'display:none'}"><label>Data de fim <span class="opt">(quando o saco acabou)</span></label><input type="date" class="input" id="rFim" value="${r.fim||''}"></div>
+  </div>
+  <div class="field"><div class="switchline"><input type="checkbox" id="rEmUso" ${!r.fim?'checked':''}> <span>esta ração ainda está <b>em uso</b> — desmarque quando o saco acabar</span></div></div>
+  <div class="frow">
+    <div class="field"><label>⚖️ Peso na balança hoje <span class="opt">(opcional — refina o consumo)</span></label><input class="input" id="rRest" inputmode="decimal" placeholder="ex.: 6,8" value="${r.kgRestante!=null?String(r.kgRestante).replace('.',','):''}"></div>
+    <div class="field"><label>💰 Custo total (R$) <span class="opt">(se não vincular compra)</span></label><input class="input" id="rCusto" inputmode="decimal" placeholder="ex.: 189,90" value="${r.custoTotal!=null?String(r.custoTotal).replace('.',','):''}"></div>
+  </div>
+  <div class="field"><label>🧾 Compra no Financeiro <span class="opt">(vincula o lançamento da compra ao custo)</span></label>
+    <select class="input" id="rLanc"><option value="">— sem vínculo —</option>${opts.map(x=>`<option value="${x.id}" ${r.lancamentoId===x.id?'selected':''}>${fmtDataCurta(x.data)} · ${esc(x.descricao)} · ${brl(x.valor)}</option>`).join('')}</select>
+    ${opts.length?'':'<div class="hint" style="margin-top:6px">Nenhuma despesa disponível — lance a compra em 🌊 Financeiro → Lançamentos e volte aqui para vincular.</div>'}</div>
+  <div class="field"><label>Observações <span class="opt">(opcional — quantos animais comem dela…)</span></label><textarea class="input" id="rObs" style="min-height:44px">${esc(r.observacoes||'')}</textarea></div>
+  <div class="modal-f"><button class="btn btn-ghost" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" id="rSalvar">${ic('check')} ${novo?'Abrir ração':'Salvar'}</button></div>`);
+  document.querySelectorAll('#segEsp [data-e]').forEach(b=>b.onclick=()=>{curEsp=b.dataset.e;
+    document.querySelectorAll('#segEsp [data-e]').forEach(x=>x.classList.toggle('on',x===b));});
+  const emUsoCb=$('#rEmUso'),fimWrap=$('#rFimWrap');
+  const syncFim=()=>{fimWrap.style.display=emUsoCb.checked?'none':'';};
+  emUsoCb.onchange=syncFim;syncFim();
+  $('#rSalvar').onclick=()=>{
+    const nome=$('#rNome').value.trim();
+    const kg=num($('#rKg').value);const abertura=$('#rAbertura').value;
+    const estaEmUso=$('#rEmUso').checked;const fim=estaEmUso?null:($('#rFim').value||null);
+    const temRest=!!$('#rRest').value.trim();const rest=num($('#rRest').value);
+    const temCusto=!!$('#rCusto').value.trim();const custo=num($('#rCusto').value);
+    const lanc=$('#rLanc').value||null;
+    if(!nome){toast('Dê um nome à ração','err');return;}
+    if(!(kg>0)){toast('Informe quantos kg tem a ração','err');return;}
+    if(!abertura){toast('Informe a data de abertura','err');return;}
+    if(!estaEmUso&&!fim){toast('Informe a data de fim — ou marque que ainda está em uso','err');return;}
+    if(fim&&fim<abertura){toast('A data de fim é antes da abertura','err');return;}
+    if(temRest&&rest>kg){toast('O peso atual não pode ser maior que o total','err');return;}
+    const row={nome,especie:curEsp,kg:r2(kg),abertura,fim,kgRestante:temRest?r2(rest):null,custoTotal:temCusto?r2(custo):null,lancamentoId:lanc,observacoes:$('#rObs').value.trim()};
+    if(novo){addLocal('racoes',{id:uid(),criadoEm:new Date().toISOString(),...row});toast('🐾 Ração aberta! Acompanhe o consumo nas visualizações.','ok');}
+    else{updLocal('racoes',r.id,row);toast('✅ Ração atualizada','ok');}
+    closeModal();render();};
+}
+
+/* ---- rações de exemplo (chamado pelo criarDemo) ---- */
+function racoesDemo(){
+  if(S.racoes.length)return;
+  const t=new Date();
+  const mk=(m,day)=>toISO(new Date(t.getFullYear(),t.getMonth()+m,Math.min(day,new Date(t.getFullYear(),t.getMonth()+m+1,0).getDate())));
+  const cat=n=>(S.categorias.find(c=>c.nome.startsWith(n))||{}).id;
+  const mkR=(nome,esp,kg,ab,fim,rest,custo,obs)=>({id:uid(),criadoEm:new Date().toISOString(),nome,especie:esp,kg,abertura:mk(...ab),fim:fim?mk(...fim):null,kgRestante:rest,custoTotal:custo,lancamentoId:null,observacoes:obs||''});
+  const racoes=[
+    mkR('Golden Gatos 10,1 kg','gatos',10.1,[-2,4],[0,2],null,null,'2 gatos + 1 visitante de rua'),
+    mkR('GranPlus Carnes 15 kg','caes',15,[-1,10],null,6.8,159.9,'3 cães — pesagem do dia 12'),
+    mkR('Fibra Plus Coelhos 5 kg','coelhos',5,[-1,20],[0,1],null,54.5,''),
+    mkR('Whiskas Sachê (caixa 12)','gatos',3.6,[0,5],null,null,47.9,'caixa de sachês, sem pesagem')];
+  if(S.contas.length){
+    const idCompra=uid();
+    addLocal('lancamentos',{id:idCompra,criadoEm:new Date().toISOString(),data:mk(-2,3),valor:189.9,tipo:'despesa',contaId:S.contas[0].id,cartaoId:null,categoriaId:cat('Outros gastos'),descricao:'Ração Golden Gatos 10,1 kg',titular:'Eu',pago:true,observacoes:'',grupo:null});
+    racoes[0].lancamentoId=idCompra;}
+  for(const r of racoes)addLocal('racoes',r);
+  toast('🐾 4 rações de exemplo criadas (1 com compra vinculada no Financeiro)','ok',4200);
+}
+
+
+
 'use strict';
 /* ============ Mar Aberto · modais, formulários, configurações, demo, boot ============ */
 
@@ -1397,20 +1631,38 @@ create table if not exists lancamentos (
   pago boolean default true, observacoes text default '', grupo text,
   "criadoEm" timestamptz default now());
 
+create table if not exists racoes (
+  id uuid primary key, nome text not null, especie text default 'gatos',
+  kg numeric default 0, abertura date not null, fim date,
+  "kgRestante" numeric, "custoTotal" numeric, "lancamentoId" uuid,
+  observacoes text default '', "criadoEm" timestamptz default now());
+
 alter table contas enable row level security;
 alter table cartoes enable row level security;
 alter table categorias enable row level security;
 alter table lancamentos enable row level security;
+alter table racoes enable row level security;
 create policy "anon total contas" on contas for all to anon using (true) with check (true);
 create policy "anon total cartoes" on cartoes for all to anon using (true) with check (true);
 create policy "anon total categorias" on categorias for all to anon using (true) with check (true);
-create policy "anon total lancamentos" on lancamentos for all to anon using (true) with check (true);`;
+create policy "anon total lancamentos" on lancamentos for all to anon using (true) with check (true);
+create policy "anon total racoes" on racoes for all to anon using (true) with check (true);`;
 
-/* para quem já criou as tabelas antes da atualização de pré-pagos */
-const SQL_MIGRA=`-- Mar Aberto · atualização: cartões pré-pagos de alimentação/refeição
--- Roda sem problema mesmo se as colunas já existirem.
+/* para quem já criou as tabelas antes das atualizações (pré-pagos e rações) */
+const SQL_MIGRA=`-- Mar Aberto · atualizações: cartões pré-pagos + aba Rações
+-- Roda sem problema mesmo se as colunas/tabelas já existirem.
 alter table cartoes add column if not exists tipo text default 'credito';
-alter table cartoes add column if not exists "saldoInicial" numeric default 0;`;
+alter table cartoes add column if not exists "saldoInicial" numeric default 0;
+
+create table if not exists racoes (
+  id uuid primary key, nome text not null, especie text default 'gatos',
+  kg numeric default 0, abertura date not null, fim date,
+  "kgRestante" numeric, "custoTotal" numeric, "lancamentoId" uuid,
+  observacoes text default '', "criadoEm" timestamptz default now());
+alter table racoes enable row level security;
+do $$ begin
+  create policy "anon total racoes" on racoes for all to anon using (true) with check (true);
+exception when duplicate_object then null; end $$;`;
 
 function formConfig(){
   const c=SB.cfg();
@@ -1471,19 +1723,19 @@ function formConfig(){
       cv.getContext('2d').drawImage(img,0,0,cv.width,cv.height);S.settings.logo=cv.toDataURL('image/png');
       persistLocal();renderBrand();toast('✅ Logo atualizado','ok');formConfig();};img.src=rd.result;};rd.readAsDataURL(f);};
   const lr=$('#logoReset');if(lr)lr.onclick=()=>{S.settings.logo=null;persistLocal();renderBrand();formConfig();};
-  $('#bkExport').onclick=()=>{baixarArquivo('mar-aberto-backup-'+todayISO()+'.json',new Blob([JSON.stringify({contas:S.contas,cartoes:S.cartoes,categorias:S.categorias,lancamentos:S.lancamentos,settings:S.settings},null,1)],{type:'application/json'}));toast('Backup gerado ✔','ok');};
+  $('#bkExport').onclick=()=>{baixarArquivo('mar-aberto-backup-'+todayISO()+'.json',new Blob([JSON.stringify({contas:S.contas,cartoes:S.cartoes,categorias:S.categorias,lancamentos:S.lancamentos,racoes:S.racoes,settings:S.settings},null,1)],{type:'application/json'}));toast('Backup gerado ✔','ok');};
   $('#bkImport').onchange=e=>{const f=e.target.files[0];if(!f)return;const rd=new FileReader();
     rd.onload=async()=>{try{const d=JSON.parse(rd.result);
-      if(await confirmAcao('Restaurar backup?',`Vai substituir os dados atuais por: <b>${(d.contas||[]).length} contas · ${(d.cartoes||[]).length} cartões · ${(d.categorias||[]).length} categorias · ${(d.lancamentos||[]).length} lançamentos</b>.`,'Restaurar')){
-        S.contas=d.contas||[];S.cartoes=d.cartoes||[];S.categorias=d.categorias||[];S.lancamentos=d.lancamentos||[];
+      if(await confirmAcao('Restaurar backup?',`Vai substituir os dados atuais por: <b>${(d.contas||[]).length} contas · ${(d.cartoes||[]).length} cartões · ${(d.categorias||[]).length} categorias · ${(d.lancamentos||[]).length} lançamentos · ${(d.racoes||[]).length} rações</b>.`,'Restaurar')){
+        S.contas=d.contas||[];S.cartoes=d.cartoes||[];S.categorias=d.categorias||[];S.lancamentos=d.lancamentos||[];S.racoes=d.racoes||[];
         if(d.settings)S.settings=Object.assign(S.settings,d.settings);persistLocal();
         const c=SB.cfg();if(c){toast('Enviando ao Supabase…');for(const t of TABLES)await SB.upsert(c,t,(S[t]||[]).map(cleanRow));}
         toast('✅ Backup restaurado','ok');closeModal();render();}}catch(err){toast('Arquivo inválido: '+err.message,'err');}};
     rd.readAsText(f);};
   $('#bkDemo').onclick=()=>{closeModal();criarDemo();};
   $('#bkZerar').onclick=async()=>{
-    if(await confirmAcao('Zerar todos os dados?','Isso apaga <b>contas, cartões, categorias e lançamentos</b> deste navegador.'+(SB.cfg()?' O que já está no Supabase continua lá; ao reconectar, o app puxa os dados de volta.':''),'Apagar tudo')){
-      S.contas=[];S.cartoes=[];S.categorias=[];S.lancamentos=[];persistLocal();seedCategorias();toast('Dados zerados','ok');closeModal();render();}};
+    if(await confirmAcao('Zerar todos os dados?','Isso apaga <b>contas, cartões, categorias, lançamentos e rações</b> deste navegador.'+(SB.cfg()?' O que já está no Supabase continua lá; ao reconectar, o app puxa os dados de volta.':''),'Apagar tudo')){
+      S.contas=[];S.cartoes=[];S.categorias=[];S.lancamentos=[];S.racoes=[];persistLocal();seedCategorias();toast('Dados zerados','ok');closeModal();render();}};
 }
 
 /* ---- seed categorias ---- */
@@ -1493,7 +1745,7 @@ function seedCategorias(){if(S.categorias.length)return;let i=0;
 
 /* ---- dados de exemplo ---- */
 function criarDemo(){
-  confirmAcao('Criar dados de exemplo?',`Vou cadastrar <b>3 contas</b> (sua, da sua esposa e da filha), <b>3 cartões</b> — 2 de crédito e 1 pré-pago de alimentação — e <b>mais de 100 lançamentos</b>, incluindo uma compra parcelada em 6× e cargas mensais no pré-pago. Depois é só editar ou zerar em Configurações.`,'Criar exemplos').then(ok=>{
+  confirmAcao('Criar dados de exemplo?',`Vou cadastrar <b>3 contas</b> (sua, da sua esposa e da filha), <b>3 cartões</b> — 2 de crédito e 1 pré-pago de alimentação — <b>mais de 100 lançamentos</b> (com compra parcelada em 6×) e <b>4 rações</b> para a aba 🐾 (gatos, cães e coelhos, uma com compra vinculada). Depois é só editar ou zerar em Configurações.`,'Criar exemplos').then(ok=>{
     if(!ok)return;
     seedCategorias();
     const cat=n=>(S.categorias.find(c=>c.nome.startsWith(n))||{}).id;
@@ -1537,6 +1789,8 @@ function criarDemo(){
     add(mk(2,12),680,'despesa',cEu.id,kNu.id,cat('Viagem'),'Pousada — fim de semana','Eu',false);
     L.forEach(l=>addLocal('lancamentos',l));
     persistLocal();
+    racoesDemo();
+    persistLocal();
     toast('✨ Exemplos criados! Explore o Resumo, a Projeção (+30 dias) e os Relatórios.','ok',5000);
     goAba('resumo');});
 }
@@ -1547,6 +1801,7 @@ function init(){
   if(!S.categorias.length&&!SB.cfg())seedCategorias();
   renderBrand();
   $$('.snav').forEach(b=>b.onclick=()=>goAba(b.dataset.aba));
+  $$('.ptab[data-frente]').forEach(b=>b.onclick=()=>goFrente(b.dataset.frente));
   $('#btnConfig').onclick=formConfig;
   $('#dbPill').onclick=formConfig;
   render();
