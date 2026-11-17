@@ -1980,14 +1980,15 @@ alter table racoes enable row level security;
 alter table "supCats" enable row level security;
 alter table "supItens" enable row level security;
 alter table "supCompras" enable row level security;
-create policy "anon total contas" on contas for all to anon using (true) with check (true);
-create policy "anon total cartoes" on cartoes for all to anon using (true) with check (true);
-create policy "anon total categorias" on categorias for all to anon using (true) with check (true);
-create policy "anon total lancamentos" on lancamentos for all to anon using (true) with check (true);
-create policy "anon total racoes" on racoes for all to anon using (true) with check (true);
-create policy "anon total "supCats"" on "supCats" for all to anon using (true) with check (true);
-create policy "anon total "supItens"" on "supItens" for all to anon using (true) with check (true);
-create policy "anon total "supCompras"" on "supCompras" for all to anon using (true) with check (true);`;
+-- policies em blocos do: pode rodar o script de novo sem erro de "já existe"
+do $$ begin create policy "anon total contas" on contas for all to anon using (true) with check (true); exception when duplicate_object then null; end $$;
+do $$ begin create policy "anon total cartoes" on cartoes for all to anon using (true) with check (true); exception when duplicate_object then null; end $$;
+do $$ begin create policy "anon total categorias" on categorias for all to anon using (true) with check (true); exception when duplicate_object then null; end $$;
+do $$ begin create policy "anon total lancamentos" on lancamentos for all to anon using (true) with check (true); exception when duplicate_object then null; end $$;
+do $$ begin create policy "anon total racoes" on racoes for all to anon using (true) with check (true); exception when duplicate_object then null; end $$;
+do $$ begin create policy "anon total supCats" on "supCats" for all to anon using (true) with check (true); exception when duplicate_object then null; end $$;
+do $$ begin create policy "anon total supItens" on "supItens" for all to anon using (true) with check (true); exception when duplicate_object then null; end $$;
+do $$ begin create policy "anon total supCompras" on "supCompras" for all to anon using (true) with check (true); exception when duplicate_object then null; end $$;`;
 
 /* para quem já criou as tabelas antes das atualizações (pré-pagos, rações e suprimentos) */
 const SQL_MIGRA=`-- Mar Aberto · atualizações: cartões pré-pagos + abas Rações e Suprimentos
@@ -2021,13 +2022,13 @@ alter table "supCats" enable row level security;
 alter table "supItens" enable row level security;
 alter table "supCompras" enable row level security;
 do $$ begin
-  create policy "anon total "supCats"" on "supCats" for all to anon using (true) with check (true);
+  create policy "anon total supCats" on "supCats" for all to anon using (true) with check (true);
 exception when duplicate_object then null; end $$;
 do $$ begin
-  create policy "anon total "supItens"" on "supItens" for all to anon using (true) with check (true);
+  create policy "anon total supItens" on "supItens" for all to anon using (true) with check (true);
 exception when duplicate_object then null; end $$;
 do $$ begin
-  create policy "anon total "supCompras"" on "supCompras" for all to anon using (true) with check (true);
+  create policy "anon total supCompras" on "supCompras" for all to anon using (true) with check (true);
 exception when duplicate_object then null; end $$;`;
 
 function formConfig(){
