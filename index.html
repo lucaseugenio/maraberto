@@ -297,6 +297,7 @@ input[type=date].input,input[type=number].input{padding-block:8px}
   <div class="projtabs">
     <button class="ptab active" data-frente="financeiro"><span class="t-emoji">🌊</span> Financeiro</button>
     <button class="ptab" data-frente="racoes"><span class="t-emoji">🐾</span> Rações</button>
+    <button class="ptab" data-frente="suprimentos"><span class="t-emoji">🧺</span> Suprimentos</button>
   </div>
 </header>
 
@@ -409,9 +410,9 @@ const CATS_SEED=[
 
 /* ---- estado ---- */
 const LS_KEY='marAberto_v1';
-let S={contas:[],cartoes:[],categorias:[],lancamentos:[],racoes:[],settings:{membros:['Eu','Esposa','Filha'],logo:null},ui:{aba:'resumo',frente:'financeiro',racaoView:'gantt'}};
-function persistLocal(){try{localStorage.setItem(LS_KEY,JSON.stringify({contas:S.contas,cartoes:S.cartoes,categorias:S.categorias,lancamentos:S.lancamentos,racoes:S.racoes,settings:S.settings}));}catch(e){console.warn('localStorage cheio/indisponível',e);}}
-function loadLocal(){try{const d=JSON.parse(localStorage.getItem(LS_KEY)||'null');if(d){S.contas=d.contas||[];S.cartoes=d.cartoes||[];S.categorias=d.categorias||[];S.lancamentos=d.lancamentos||[];S.racoes=d.racoes||[];S.settings=Object.assign({membros:['Eu','Esposa','Filha'],logo:null},d.settings||{});}}catch(e){console.warn('dados locais corrompidos',e);}}
+let S={contas:[],cartoes:[],categorias:[],lancamentos:[],racoes:[],supCats:[],supItens:[],supCompras:[],settings:{membros:['Eu','Esposa','Filha'],logo:null},ui:{aba:'resumo',frente:'financeiro',racaoView:'gantt',supView:'itens'}};
+function persistLocal(){try{localStorage.setItem(LS_KEY,JSON.stringify({contas:S.contas,cartoes:S.cartoes,categorias:S.categorias,lancamentos:S.lancamentos,racoes:S.racoes,supCats:S.supCats,supItens:S.supItens,supCompras:S.supCompras,settings:S.settings}));}catch(e){console.warn('localStorage cheio/indisponível',e);}}
+function loadLocal(){try{const d=JSON.parse(localStorage.getItem(LS_KEY)||'null');if(d){S.contas=d.contas||[];S.cartoes=d.cartoes||[];S.categorias=d.categorias||[];S.lancamentos=d.lancamentos||[];S.racoes=d.racoes||[];S.supCats=d.supCats||[];S.supItens=d.supItens||[];S.supCompras=d.supCompras||[];S.settings=Object.assign({membros:['Eu','Esposa','Filha'],logo:null},d.settings||{});}}catch(e){console.warn('dados locais corrompidos',e);}}
 
 /* ---- Supabase (REST direto, sem dependências) ---- */
 /* SUPABASE_PRESET é injetado no build (src/supabase_config.json) quando o usuário
@@ -439,25 +440,30 @@ const SB={
   upsert(c,t,rows){return this.req(c,'POST',t+'?on_conflict=id',rows,'resolution=merge-duplicates');},
   async ping(c){const r=await fetch(c.url.replace(/\/+$/,'')+'/rest/v1/contas?select=id&limit=1',{headers:{apikey:c.key,Authorization:'Bearer '+c.key}});if(!r.ok)throw new Error('HTTP '+r.status);return true;}
 };
-const TABLES=['contas','cartoes','categorias','lancamentos','racoes'];
+const TABLES=['contas','cartoes','categorias','lancamentos','racoes','supCats','supItens','supCompras'];
 function cleanRow(o){const{...rest}=o;delete rest._local;return rest;}
 async function syncRemoto(fn,okMsg){const c=SB.cfg();if(!c)return;try{await fn(c);}catch(e){console.warn(e);toast('⚠️ Salvo localmente, mas falhou no Supabase: '+e.message,'warn',4200);}}
 async function pullRemoto(){
   const c=SB.cfg();if(!c)return;
-  const dados={};
-  for(const t of TABLES){try{dados[t]=await SB.list(c,t)||[];}catch(e){
-    // tabela ainda não criada (ex.: racoes antes da migração) → segue com vazio
-    dados[t]=[];if(t==='racoes')setTimeout(()=>toast('⚠️ Aba Rações: rode a migração no Supabase para sincronizar (⚙️ Configurações → Ver migração)','warn',6000),1200);}}
   const localAntes={};for(const t of TABLES)localAntes[t]=S[t]||[];
+  const dados={};const faltam=[];const nomeT={racoes:'rações',supCats:'categorias da casa',supItens:'itens da casa',supCompras:'compras da casa'};
+  for(const t of TABLES){try{dados[t]=await SB.list(c,t)||[];}catch(e){
+    // tabela ainda não criada (ex.: racoes/suprimentos antes da migração) → mantém os dados locais, não apaga nada
+    dados[t]=localAntes[t].slice();faltam.push(t);}}
+  if(faltam.length)setTimeout(()=>toast('⚠️ Para sincronizar ('+faltam.map(t=>nomeT[t]||t).join(', ')+') rode a migração no Supabase — ⚙️ Configurações → Ver migração','warn',6000),1200);
   // normaliza (numeric volta como string via PostgREST)
   S.contas=dados.contas.map(r=>({...r,saldoInicial:r2(r.saldoInicial),meta:r.meta==null?null:r2(r.meta)}));
   S.cartoes=dados.cartoes.map(r=>({...r,tipo:r.tipo||'credito',diaFechamento:+r.diaFechamento||20,diaVencimento:+r.diaVencimento||5,limite:r.limite==null?null:r2(r.limite),saldoInicial:r2(r.saldoInicial||0)}));
   S.categorias=dados.categorias.map(r=>({...r}));
   S.lancamentos=dados.lancamentos.map(r=>({...r,valor:r2(r.valor),pago:!!r.pago}));
   S.racoes=(dados.racoes||[]).map(r=>({...r,kg:r2(r.kg||0),kgRestante:(r.kgRestante==null||r.kgRestante==='')?null:r2(r.kgRestante),custoTotal:(r.custoTotal==null||r.custoTotal==='')?null:r2(r.custoTotal),especie:r.especie||'gatos'}));
+  S.supCats=(dados.supCats||[]).map(r=>({...r}));
+  S.supItens=(dados.supItens||[]).map(r=>({...r,consumoMes:r2(r.consumoMes||0)}));
+  S.supCompras=(dados.supCompras||[]).map(r=>({...r,qtd:r2(r.qtd||0),preco:r2(r.preco||0)}));
   // migração: tabela remota vazia + dados locais → envia (e mantém os dados na tela)
   let migrou=false;
   for(const t of TABLES){
+    if(faltam.includes(t))continue;
     if((dados[t]||[]).length===0&&localAntes[t].length){
       try{await SB.upsert(c,t,localAntes[t].map(cleanRow));S[t]=localAntes[t];migrou=true;}
       catch(e){console.warn('migração falhou em '+t,e);}}}
@@ -502,6 +508,37 @@ function racoesMensal(mkList){return mkList.map(mk=>{const mFim=monthEndISO(mk+'
     if(ini>fim)continue;kg+=racaoKgDia(r)*racaoDias(ini,fim);
     if(monthKey(r.abertura)===mk){custo+=racaoCusto(r);n++;}}
   return{mk,kg:r2(kg),custo:r2(custo),n};});}
+
+/* ---- Suprimentos (casa) — itens, compras e categorias próprias (não tocam o Financeiro) ---- */
+const SUP_CATS_SEED=[['Alimentação','🍽️','#85C3AB'],['Higiene','🧼','#5C93A6'],['Limpeza','🧹','#A9A3D8'],['Pet','🐾','#E09A85'],['Saúde','💊','#DB9BB4'],['Papelaria','✏️','#7FA8C9'],['Outros','📦','#9AA5B1']];
+function seedSupCats(){if(S.supCats.length)return;
+  for(const[nome,icone,cor]of SUP_CATS_SEED)addLocal('supCats',{id:uid(),criadoEm:new Date().toISOString(),nome,icone,cor,sistema:true});}
+const supCatById=id=>S.supCats.find(c=>c.id===id);
+const supItemById=id=>S.supItens.find(i=>i.id===id);
+const supPrecoUn=c=>(c&&c.qtd>0)?r2(c.preco/c.qtd):null;
+const supComprasDe=itemId=>S.supCompras.filter(c=>c.itemId===itemId).sort((a,b)=>a.data<b.data?-1:b.data>a.data?1:0);
+/* consumo: guarda por mês; semana = mês ÷ 4,345 (média de semanas num mês); dia = mês ÷ 30,44 */
+const supConsumoSem=i=>r2((i.consumoMes||0)/4.345);
+const supConsumoDia=i=>(i.consumoMes||0)/30.44;
+function supVarPct(a,b){if(!(a>0&&b>0))return null;return r2((a-b)/b*100);}
+/* semana a semana: última compra vs compra anterior (preço unitário) */
+function supVarUltima(itemId){const cs=supComprasDe(itemId);if(cs.length<2)return null;
+  const u1=supPrecoUn(cs[cs.length-1]),u0=supPrecoUn(cs[cs.length-2]);const pct=supVarPct(u1,u0);
+  return pct==null?null:{pct,un1:u1,un0:u0,data1:cs[cs.length-1].data};}
+/* mês a mês: média do preço unitário no mês da última compra vs no mês anterior */
+function supVarMes(itemId){const cs=supComprasDe(itemId);if(!cs.length)return null;
+  const d=parseISO(cs[cs.length-1].data);const mkUlt=monthKey(toISO(d));
+  const ant=new Date(d.getFullYear(),d.getMonth()-1,1);const mkAnt=monthKey(toISO(ant));
+  const med=mk=>{const xs=cs.filter(c=>monthKey(c.data)===mk).map(supPrecoUn).filter(x=>x>0);return xs.length?r2(xs.reduce((s,x)=>s+x,0)/xs.length):null;};
+  const m1=med(mkUlt),m0=med(mkAnt);if(m1==null||m0==null)return null;
+  return{pct:supVarPct(m1,m0),m1,m0,mk:mkUlt};}
+/* gasto total por mês e por semana (segunda-feira como início da semana) */
+function supGastoMensal(mkList){return mkList.map(mk=>({mk,gasto:r2(S.supCompras.filter(c=>monthKey(c.data)===mk).reduce((s,c)=>s+c.preco,0))}));}
+function mondayOf(iso){const d=parseISO(iso);const off=(d.getDay()+6)%7;return toISO(new Date(d.getFullYear(),d.getMonth(),d.getDate()-off));}
+function supGastoSemanal(n){const seg=mondayOf(todayISO());const out=[];
+  for(let i=n-1;i>=0;i--){const ini=addDaysISO(seg,-7*i);const fim=addDaysISO(ini,6);
+    out.push({ini,fim,gasto:r2(S.supCompras.filter(c=>c.data>=ini&&c.data<=fim).reduce((s,c)=>s+c.preco,0))});}
+  return out;}
 
 /* ============ cálculos ============ */
 /* Lançamentos: tipo 'receita' | 'despesa' | 'pagamento_cartao' | 'carga_cartao'.
@@ -666,7 +703,8 @@ function render(){
   renderBrand();updateDbPill();updateNavBadges();
   const v=$('#view');v.innerHTML='';
   const secNav=$('#secNav');
-  if(S.ui.frente==='racoes'){if(secNav)secNav.style.display='none';renderRacoes(v);return;}
+  if(S.ui.frente!=='financeiro'){if(secNav)secNav.style.display='none';
+    ({racoes:renderRacoes,suprimentos:renderSuprimentos}[S.ui.frente]||renderRacoes)(v);return;}
   if(secNav)secNav.style.display='';
   ({resumo:renderResumo,lancamentos:renderLancamentos,contas:renderContas,cartoes:renderCartoes,categorias:renderCategorias,projecao:renderProjecao,relatorios:renderRelatorios}[S.ui.aba]||renderResumo)(v);
 }
@@ -683,7 +721,8 @@ function updateNavBadges(){
   const lant=$('.snav[data-aba="lancamentos"]');if(lant)lant.innerHTML=`🧾 Lançamentos${lanFut?` <span class="badge">${lanFut} futuros</span>`:''}`;
   const ct=$('.snav[data-aba="contas"]');if(ct)ct.innerHTML=`🏦 Contas${S.contas.length?` <span class="badge">${S.contas.length}</span>`:''}`;
   const ck=$('.snav[data-aba="cartoes"]');if(ck)ck.innerHTML=`💳 Cartões${S.cartoes.length?` <span class="badge">${S.cartoes.length}</span>`:''}`;
-  const rk=$('.ptab[data-frente="racoes"]');if(rk)rk.innerHTML=`<span class="t-emoji">🐾</span> Rações${S.racoes.length?` <span class="badge">${S.racoes.length}</span>`:''}`;}
+  const rk=$('.ptab[data-frente="racoes"]');if(rk)rk.innerHTML=`<span class="t-emoji">🐾</span> Rações${S.racoes.length?` <span class="badge">${S.racoes.length}</span>`:''}`;
+  const sp=$('.ptab[data-frente="suprimentos"]');if(sp)sp.innerHTML=`<span class="t-emoji">🧺</span> Suprimentos${S.supItens.length?` <span class="badge">${S.supItens.length}</span>`:''}`;}
 
 function secHead(titulo,desc,actions=''){return `<div class="sechead"><div><h1>${titulo}</h1>${desc?`<div class="desc">${desc}</div>`:''}</div><div class="actions">${actions}</div></div>`;}
 function kpi(classe,icon,lbl,val,sub){return `<div class="kpi ${classe}"><div class="wash"></div><div class="lbl">${icon} ${lbl}</div><div class="val">${val}</div>${sub?`<div class="sub">${sub}</div>`:''}</div>`;}
@@ -1300,6 +1339,289 @@ function racoesDemo(){
 
 
 
+/* ============ FRENTE SUPRIMENTOS (casa) ============
+   Itens que a casa consome (com consumo por mês/semana) + compras com preço,
+   para comparar semana a semana e mês a mês. Categorias próprias — independentes do Financeiro. */
+function fmtQ(n,un){return (n==null?'—':n.toLocaleString('pt-BR',{maximumFractionDigits:1}))+(un?' '+un:'');}
+function varChip(pct,label){if(pct==null)return '';
+  const up=pct>0;
+  return `<span class="chip" style="background:${up?'var(--coral-soft)':'var(--green-soft)'};color:${up?'var(--coral-deep)':'var(--green-deep)'}">${up?'▲':'▼'} ${Math.abs(pct).toLocaleString('pt-BR',{maximumFractionDigits:1})}% ${label}</span>`;}
+
+function renderSuprimentos(v){
+  const mk=monthKey(todayISO());
+  const gastoMes=S.supCompras.filter(c=>monthKey(c.data)===mk).reduce((s,c)=>s+c.preco,0);
+  const gastoSem=S.supCompras.filter(c=>c.data>=mondayOf(todayISO())&&c.data<=todayISO()).reduce((s,c)=>s+c.preco,0);
+  const emAlta=S.supItens.filter(i=>{const x=supVarUltima(i.id);return x&&x.pct>0;}).length;
+  const views=[['itens','📋 Itens'],['mes','📅 Mês a mês'],['semana','📆 Semana a semana'],['cats','🏷️ Categorias']];
+  const semDados=!S.supItens.length;
+  v.innerHTML=`${secHead('🧺 Suprimentos','Tudo o que a casa consome: cadastre os itens com o consumo por mês, lance cada compra com o preço e acompanhe a variação semana a semana e mês a mês.',
+    `<button class="btn btn-primary" data-newcompra>${ic('plus')} Registrar compra</button> <button class="btn btn-soft" data-newitem>${ic('plus')} Novo item</button>`)}
+  ${semDados?`<div class="note" style="margin-bottom:16px">🧺 Bem-vindo aos Suprimentos! Cadastre os <b>itens</b> (com o consumo mensal) e vá lançando as <b>compras com os preços</b> — o app compara semana a semana e mês a mês sozinho. Ou <button class="btn btn-sm btn-soft" data-supdemo>✨ Criar exemplos</button></div>`:''}
+  <div class="kpis">
+    ${kpi('t-teal','🧺','Itens cadastrados',String(S.supItens.length),`${S.supCats.length} categorias de casa`)}
+    ${kpi('t-coral','💰','Gasto no mês',brl(gastoMes),'compras de suprimentos')}
+    ${kpi('t-amber','📆','Gasto nesta semana',brl(gastoSem),'desde a segunda-feira')}
+    ${kpi(emAlta?'t-coral':'t-green','📈','Preços em alta',String(emAlta),'itens com a última compra mais cara')}
+  </div>
+  <div class="seg" id="segSupView" style="margin-bottom:16px">${views.map(([k,n])=>`<button type="button" data-v="${k}" class="${(S.ui.supView||'itens')===k?'on':''}">${n}</button>`).join('')}</div>
+  <div id="supView">${({itens:itensSup,mes:mesSup,semana:semanaSup,cats:catsSup})[S.ui.supView||'itens']()}</div>`;
+  v.querySelectorAll('#segSupView [data-v]').forEach(b=>b.onclick=()=>{S.ui.supView=b.dataset.v;render();});
+  v.querySelectorAll('[data-newcompra]').forEach(b=>b.onclick=()=>formSupCompra());
+  v.querySelectorAll('[data-newitem]').forEach(b=>b.onclick=()=>formSupItem());
+  v.querySelectorAll('[data-newsupcat]').forEach(b=>b.onclick=()=>formSupCat());
+  v.querySelectorAll('[data-edititem]').forEach(b=>b.onclick=()=>{const i=supItemById(b.dataset.edititem);if(i)formSupItem(i);});
+  v.querySelectorAll('[data-comprar]').forEach(b=>b.onclick=()=>{const i=supItemById(b.dataset.comprar);if(i)formSupCompra(null,i);});
+  v.querySelectorAll('[data-hist]').forEach(b=>b.onclick=()=>{const i=supItemById(b.dataset.hist);if(i)histSupItem(i);});
+  v.querySelectorAll('[data-delitem]').forEach(b=>b.onclick=async()=>{
+    const i=supItemById(b.dataset.delitem);if(!i)return;
+    const nC=S.supCompras.filter(c=>c.itemId===i.id).length;
+    if(await confirmAcao('Excluir item?',`<b>${esc(i.nome)}</b>${nC?` — as <b>${nC} compra(s)</b> registradas nele também serão excluídas.`:''}`,'Excluir')){
+      for(const c of S.supCompras.filter(c=>c.itemId===i.id).slice())delLocal('supCompras',c.id);
+      delLocal('supItens',i.id);toast('Item excluído','ok');render();}});
+  v.querySelectorAll('[data-editcat]').forEach(b=>b.onclick=()=>{const c=supCatById(b.dataset.editcat);if(c)formSupCat(c);});
+  v.querySelectorAll('[data-delcat]').forEach(b=>b.onclick=async()=>{
+    const c=supCatById(b.dataset.delcat);if(!c)return;
+    const usos=S.supItens.filter(i=>i.catId===c.id).length;
+    if(await confirmAcao('Excluir categoria?',`<b>${esc(c.nome)}</b>${usos?` — <b>${usos} item(ns)</b> vão ficar sem categoria.`:''}`,'Excluir')){
+      delLocal('supCats',c.id);toast('Categoria excluída','ok');render();}});
+  v.querySelectorAll('[data-supdemo]').forEach(b=>b.onclick=()=>supDemo());
+}
+
+/* ---- lista de itens (com comparações de preço) ---- */
+function itensSup(){
+  if(!S.supItens.length)return `<div class="card"><div class="empty" style="padding:22px"><span class="em">🧺</span><b>Nenhum item</b>Cadastre o primeiro item para começar a acompanhar consumo e preços.</div></div>`;
+  const rows=[...S.supItens].sort((a,b)=>a.nome.toLowerCase()<b.nome.toLowerCase()?-1:1);
+  return `<div class="card"><div class="card-h"><h3>📋 Itens da casa</h3><span class="hint">${rows.length} itens · 🕘 histórico · 🛒 registrar compra</span></div>
+  ${rows.map(i=>{
+    const cat=supCatById(i.catId);const cs=supComprasDe(i.id);const ult=cs[cs.length-1];
+    const un=ult?supPrecoUn(ult):null;
+    const vSem=supVarUltima(i.id);const vMes=supVarMes(i.id);
+    const rende=(ult&&i.consumoMes>0)?Math.max(1,Math.round(ult.qtd/supConsumoDia(i)/7)):null;
+    return `<div class="lan-row">
+      <div class="data" style="background:${hexSoft(cat?cat.cor:'#9AA5B1',.16)}">${cat?cat.icone:'📦'}<small>${esc(cat?cat.nome:'Sem categoria')}</small></div>
+      <div class="desc"><b>${esc(i.nome)}</b>
+        <div class="meta-line">
+          <span class="chip" style="background:var(--line-soft)">consome ${fmtQ(i.consumoMes,i.un)}/mês · ~${fmtQ(supConsumoSem(i),i.un)}/sem</span>
+          ${ult?`<span class="chip" style="background:var(--line-soft)">última ${fmtDataCurta(ult.data)} · ${brl(ult.preco)} (${fmtQ(ult.qtd,i.un)})</span>`:'<span class="chip" style="background:var(--line-soft)">sem compras ainda</span>'}
+          ${un!=null?`<span class="chip" style="background:var(--teal-soft);color:var(--teal-deep)">${brl(un)}/${i.un}</span>`:''}
+          ${vSem?varChip(vSem.pct,'vs anterior'):''}${vMes?varChip(vMes.pct,'mês a mês'):''}
+          ${rende?`<span class="chip" style="background:var(--lilac-soft);color:#6F69A5">rende ~${rende} sem</span>`:''}
+          ${i.observacoes?`<span class="muted">${esc(i.observacoes)}</span>`:''}
+        </div></div>
+      <div class="ops">
+        ${ult?`<button class="iconbtn" data-hist="${i.id}" title="Histórico de preços">🕘</button>`:''}
+        <button class="iconbtn" data-comprar="${i.id}" title="Registrar compra">🛒</button>
+        <button class="iconbtn" data-edititem="${i.id}" title="Editar">${ic('pencil')}</button>
+        <button class="iconbtn del" data-delitem="${i.id}" title="Excluir">${ic('trash')}</button></div>
+      <span class="valor" style="color:var(--ink-faint)">${un!=null?brl(un):'—'}</span></div>`;}).join('')}
+  </div>`;
+}
+
+/* ---- barras reutilizáveis ---- */
+function supBars(dados,valFn,labelFn){
+  const max=Math.max(...dados.map(valFn),1);
+  return `<div style="display:flex;align-items:flex-end;gap:10px;height:180px;padding:6px 4px 0">
+    ${dados.map(d=>{const val=valFn(d);const h=Math.max(Math.round(val/max*120),val>0?6:2);
+      return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%">
+        <b style="font-size:.76rem;color:var(--ink-soft)">${val>0?brl(val):'—'}</b>
+        <div style="width:70%;max-width:64px;height:${h}px;background:linear-gradient(180deg,var(--teal),var(--teal-deep));border-radius:8px 8px 4px 4px;opacity:.92"></div>
+        <small style="font-size:.68rem;font-weight:800;color:var(--ink-faint);margin-top:4px">${labelFn(d)}</small></div>`;}).join('')}
+  </div>`;
+}
+
+/* ---- mês a mês ---- */
+function mesSup(){
+  if(!S.supCompras.length)return `<div class="card"><div class="empty" style="padding:22px"><span class="em">📅</span><b>Sem compras ainda</b>Lance compras para ver o gasto por mês e a comparação de preços.</div></div>`;
+  const dados=supGastoMensal(ultimosMk(6));
+  const vars=S.supItens.map(i=>({i,x:supVarMes(i.id)})).filter(o=>o.x).sort((a,b)=>b.x.pct-a.x.pct);
+  return `<div class="card"><div class="card-h"><h3>📅 Gasto por mês</h3><span class="hint">compras de suprimentos, últimos 6 meses</span></div>
+    ${supBars(dados,d=>d.gasto,d=>fmtMes(d.mk))}</div>
+  <div class="card" style="margin-top:16px"><div class="card-h"><h3>📅 Comparação mês a mês</h3><span class="hint">média do preço no mês da última compra vs mês anterior</span></div>
+    ${vars.length?vars.map(({i,x})=>`<div class="lan-row">
+      <div class="desc"><b>${esc(i.nome)}</b>
+        <div class="meta-line"><span class="chip" style="background:var(--line-soft)">${brl(x.m0)} → ${brl(x.m1)} por ${i.un}</span>${varChip(x.pct,'vs mês anterior')}</div></div>
+      <span class="valor" style="font-size:.78rem;color:var(--ink-faint);white-space:nowrap">${brl(x.m1)}/${i.un}</span></div>`).join('')
+    :`<div class="empty" style="padding:18px"><span class="em">📅</span><b>As comparações aparecem aqui</b>Faça compras do mesmo item em meses diferentes.</div>`}</div>`;
+}
+
+/* ---- semana a semana ---- */
+function semanaSup(){
+  if(!S.supCompras.length)return `<div class="card"><div class="empty" style="padding:22px"><span class="em">📆</span><b>Sem compras ainda</b>Lance compras para ver o gasto por semana e a comparação de preços.</div></div>`;
+  const dados=supGastoSemanal(8);
+  const vars=S.supItens.map(i=>({i,x:supVarUltima(i.id)})).filter(o=>o.x).sort((a,b)=>b.x.pct-a.x.pct);
+  return `<div class="card"><div class="card-h"><h3>📆 Gasto por semana</h3><span class="hint">últimas 8 semanas, começando na segunda</span></div>
+    ${supBars(dados,d=>d.gasto,d=>parseISO(d.ini).getDate()+'/'+(parseISO(d.ini).getMonth()+1))}</div>
+  <div class="card" style="margin-top:16px"><div class="card-h"><h3>📆 Comparação semana a semana</h3><span class="hint">última compra vs compra anterior (preço unitário)</span></div>
+    ${vars.length?vars.map(({i,x})=>`<div class="lan-row">
+      <div class="desc"><b>${esc(i.nome)}</b>
+        <div class="meta-line"><span class="chip" style="background:var(--line-soft)">${brl(x.un0)} → ${brl(x.un1)} por ${i.un}</span>${varChip(x.pct,'vs anterior')}<span class="chip" style="background:var(--line-soft)">compra ${fmtDataCurta(x.data1)}</span></div></div>
+      <span class="valor" style="font-size:.78rem;color:var(--ink-faint);white-space:nowrap">${brl(x.un1)}/${i.un}</span></div>`).join('')
+    :`<div class="empty" style="padding:18px"><span class="em">📆</span><b>As comparações aparecem aqui</b>Lance a mesma item comprado em semanas diferentes.</div>`}</div>`;
+}
+
+/* ---- categorias da casa ---- */
+function catsSup(){
+  return `<div class="card"><div class="card-h"><h3>🏷️ Categorias da casa</h3><span class="hint">${S.supCats.length} cadastradas · independentes do Financeiro</span><div class="right"><button class="btn btn-sm btn-primary" data-newsupcat>${ic('plus')} Nova categoria</button></div></div>
+  ${S.supCats.length?`<div class="cats-grid">${S.supCats.map(c=>{
+    const itens=S.supItens.filter(i=>i.catId===c.id);
+    const gasto=S.supCompras.filter(k=>itens.some(i=>i.id===k.itemId)).reduce((s,k)=>s+k.preco,0);
+    return `<div class="cat-card"><span class="em" style="background:${hexSoft(c.cor,.15)}">${c.icone||'📦'}</span>
+      <div><b>${esc(c.nome)}</b><small>${itens.length} item(ns)${gasto>0?` · ${brl(gasto)} em compras`:' · sem compras'}</small></div>
+      <div class="ops"><button class="iconbtn" data-editcat="${c.id}" title="Editar">${ic('pencil')}</button><button class="iconbtn del" data-delcat="${c.id}" title="Excluir">${ic('trash')}</button></div></div>`;}).join('')}</div>`
+  :`<div class="empty" style="padding:18px"><span class="em">🏷️</span><b>Nenhuma categoria</b>Crie as categorias que fazem sentido na sua casa.</div>`}</div>`;
+}
+
+/* ---- histórico de preços do item ---- */
+function histSupItem(i){
+  const cs=supComprasDe(i.id).slice().reverse();
+  const bars=supComprasDe(i.id).slice(-8);
+  const un=bars.map(supPrecoUn);const maxU=Math.max(...un.map(x=>x||0),1);
+  const vS=supVarUltima(i.id);const vM=supVarMes(i.id);
+  const ult=cs[0];
+  const rende=(ult&&i.consumoMes>0)?Math.max(1,Math.round(ult.qtd/supConsumoDia(i)/7)):null;
+  openModal(`<div class="modal-h"><h2>🕘 ${esc(i.nome)} — histórico</h2><button class="iconbtn" onclick="closeModal()">${ic('x')}</button></div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
+    <span class="chip" style="background:var(--line-soft)">consome ${fmtQ(i.consumoMes,i.un)}/mês · ~${fmtQ(supConsumoSem(i),i.un)}/sem</span>
+    ${vS?varChip(vS.pct,'vs compra anterior'):''}${vM?varChip(vM.pct,'mês a mês'):''}
+    ${rende?`<span class="chip" style="background:var(--lilac-soft);color:#6F69A5">última compra rende ~${rende} semanas</span>`:''}
+  </div>
+  ${bars.length>1?`<div style="display:flex;align-items:flex-end;gap:8px;height:130px;padding:4px 2px 0;margin-bottom:6px">
+    ${bars.map((c,ix)=>{const h=Math.max(Math.round((un[ix]||0)/maxU*80),(un[ix]||0)>0?6:2);
+      return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%">
+        <b style="font-size:.68rem;color:var(--ink-soft)">${un[ix]!=null?brl(un[ix]):''}</b>
+        <div style="width:80%;height:${h}px;background:linear-gradient(180deg,var(--teal),var(--teal-deep));border-radius:6px 6px 3px 3px;opacity:.92"></div>
+        <small style="font-size:.62rem;color:var(--ink-faint);margin-top:3px">${parseISO(c.data).getDate()}/${parseISO(c.data).getMonth()+1}</small></div>`;}).join('')}</div>`:''}
+  <div style="max-height:240px;overflow:auto">
+  ${cs.length?cs.map(c=>{const d=parseISO(c.data);
+    return `<div class="lan-row" style="padding:7px 0">
+    <div class="data">${d.getDate()}<small>${MESES[d.getMonth()]}</small></div>
+    <div class="desc"><b>${brl(c.preco)}</b> · ${fmtQ(c.qtd,i.un)}${c.local?` <span class="muted">· ${esc(c.local)}</span>`:''}
+      <div class="meta-line"><span class="chip" style="background:var(--teal-soft);color:var(--teal-deep)">${supPrecoUn(c)!=null?brl(supPrecoUn(c))+'/'+i.un:'—'}</span></div></div>
+    <div class="ops"><button class="iconbtn" data-editcompra="${c.id}" title="Editar">${ic('pencil')}</button><button class="iconbtn del" data-delcompra="${c.id}" title="Excluir">${ic('trash')}</button></div>
+    <span class="valor" style="font-size:.78rem;color:var(--ink-faint);white-space:nowrap">${supPrecoUn(c)!=null?brl(supPrecoUn(c))+'/'+i.un:'—'}</span></div>`;}).join('')
+  :`<div class="empty" style="padding:16px"><span class="em">🛒</span><b>Sem compras ainda</b></div>`}</div>
+  <div class="modal-f"><button class="btn btn-ghost" onclick="closeModal()">Fechar</button><button class="btn btn-primary" id="hComprar">${ic('plus')} Registrar compra</button></div>`);
+  $('#hComprar').onclick=()=>{closeModal();formSupCompra(null,i);};
+  document.querySelectorAll('[data-editcompra]').forEach(b=>b.onclick=()=>{closeModal();const c=S.supCompras.find(x=>x.id===b.dataset.editcompra);if(c)formSupCompra(c);});
+  document.querySelectorAll('[data-delcompra]').forEach(b=>b.onclick=async()=>{
+    const c=S.supCompras.find(x=>x.id===b.dataset.delcompra);if(!c)return;
+    if(await confirmAcao('Excluir compra?',`<b>${esc(i.nome)}</b> · ${brl(c.preco)} · ${fmtData(c.data)}`,'Excluir')){
+      delLocal('supCompras',c.id);toast('Compra excluída','ok');closeModal();render();}});
+}
+
+/* ---- form item ---- */
+function formSupItem(l){
+  const novo=!l;const r=l||{};
+  if(!S.supCats.length){toast('Crie uma categoria primeiro (aba 🏷️ Categorias)','warn');S.ui.supView='cats';render();return;}
+  openModal(`<div class="modal-h"><h2>${novo?'🧺 Novo item':'✏️ Editar item'}</h2><button class="iconbtn" onclick="closeModal()">${ic('x')}</button></div>
+  <div class="field"><label>Nome do item</label><input class="input" id="sNome" placeholder="ex.: Arroz tipo 1, Detergente 500 ml…" value="${esc(r.nome||'')}"></div>
+  <div class="frow">
+    <div class="field"><label>Categoria da casa</label><select class="input" id="sCat">${S.supCats.map(c=>`<option value="${c.id}" ${r.catId===c.id?'selected':''}>${c.icone||'📦'} ${esc(c.nome)}</option>`).join('')}</select></div>
+    <div class="field"><label>Unidade</label><select class="input" id="sUn">${['un','kg','g','L','ml','pct','cx','rolo'].map(u=>`<option ${r.un===u?'selected':''}>${u}</option>`).join('')}</select></div>
+  </div>
+  <div class="frow">
+    <div class="field"><label>Consumo</label><input class="input" id="sCons" inputmode="decimal" placeholder="ex.: 3" value="${r.consumoMes!=null?String(r.consumoMes).replace('.',','):''}"></div>
+    <div class="field"><label>&nbsp;</label><select class="input" id="sPer"><option value="mes" ${r.id?'selected':''}>por mês</option><option value="semana">por semana</option></select></div>
+  </div>
+  <div class="hint" id="sHint" style="margin:-6px 0 12px">Como você prefere informar — o app guarda por mês e mostra a semana (mês ÷ 4,3).</div>
+  <div class="field"><label>Observações <span class="opt">(opcional — marca preferida, onde costuma comprar…)</span></label><textarea class="input" id="sObs" style="min-height:44px">${esc(r.observacoes||'')}</textarea></div>
+  <div class="modal-f"><button class="btn btn-ghost" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" id="sSalvar">${ic('check')} ${novo?'Cadastrar item':'Salvar'}</button></div>`);
+  const upd=()=>{const v=num($('#sCons').value);const per=$('#sPer').value;
+    const mes=per==='semana'?v*4.345:v;
+    $('#sHint').textContent=v>0?`≈ ${fmtQ(per==='semana'?v*4.345:v,'')}/mês · ~${fmtQ(per==='semana'?v:v/4.345,'')}/semana`:'Como você prefere informar — o app guarda por mês e mostra a semana (mês ÷ 4,3).';};
+  $('#sCons').oninput=upd;$('#sPer').onchange=upd;
+  $('#sSalvar').onclick=()=>{
+    const nome=$('#sNome').value.trim();
+    const per=$('#sPer').value;const v=num($('#sCons').value);
+    if(!nome){toast('Dê um nome ao item','err');return;}
+    if(!(v>=0)){toast('Informe o consumo','err');return;}
+    const row={nome,catId:$('#sCat').value,un:$('#sUn').value,consumoMes:per==='semana'?r2(v*4.345):r2(v),observacoes:$('#sObs').value.trim()};
+    if(novo){addLocal('supItens',{id:uid(),criadoEm:new Date().toISOString(),...row});toast('🧺 Item cadastrado! Agora registre as compras com os preços.','ok');}
+    else{updLocal('supItens',r.id,row);toast('✅ Item atualizado','ok');}
+    closeModal();render();};
+}
+
+/* ---- form compra ---- */
+function formSupCompra(l,preItem){
+  const novo=!l;const r=l||{};
+  if(!S.supItens.length){toast('Cadastre um item primeiro','warn');S.ui.supView='itens';render();return;}
+  const unDe=id=>{const it=supItemById(id);return it?it.un:'';};
+  openModal(`<div class="modal-h"><h2>${novo?'🛒 Registrar compra':'✏️ Editar compra'}</h2><button class="iconbtn" onclick="closeModal()">${ic('x')}</button></div>
+  <div class="frow">
+    <div class="field" style="flex:2"><label>Item</label><select class="input" id="sItem">${S.supItens.map(i=>`<option value="${i.id}" ${r.itemId===i.id?'selected':''}>${esc(i.nome)}</option>`).join('')}</select></div>
+    <div class="field"><label>Data</label><input type="date" class="input" id="sData" value="${r.data||todayISO()}"></div>
+  </div>
+  <div class="frow">
+    <div class="field"><label>Quantidade <span class="opt" id="sUnLbl"></span></label><input class="input" id="sQtd" inputmode="decimal" placeholder="ex.: 5" value="${r.qtd!=null?String(r.qtd).replace('.',','):''}"></div>
+    <div class="field"><label>Preço total (R$)</label><input class="input" id="sPreco" inputmode="decimal" placeholder="ex.: 24,90" value="${r.preco!=null?String(r.preco).replace('.',','):''}"></div>
+  </div>
+  <div class="field"><label>Onde comprou <span class="opt">(opcional — para comparar lugares)</span></label><input class="input" id="sLocal" placeholder="ex.: Mercado do bairro, Atacadão…" value="${esc(r.local||'')}"></div>
+  <div class="note tealnote" id="sUnHint" style="margin-bottom:14px">Informe quantidade e preço para ver o preço unitário.</div>
+  <div class="modal-f"><button class="btn btn-ghost" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" id="sSalvar">${ic('check')} ${novo?'Registrar compra':'Salvar'}</button></div>`);
+  const updUn=()=>{const it=supItemById($('#sItem').value);$('#sUnLbl').textContent=it?`(${it.un})`:'';};
+  const upd=()=>{const it=supItemById($('#sItem').value);const q=num($('#sQtd').value);const p=num($('#sPreco').value);
+    $('#sUnHint').innerHTML=(it&&q>0&&p>0)?`💵 ${brl(r2(p/q))} por ${it.un}${it.consumoMes>0?` · essa compra rende ~${Math.max(1,Math.round(q/supConsumoDia(it)/7))} semanas`:''}`:'Informe quantidade e preço para ver o preço unitário.';};
+  updUn();upd();
+  $('#sItem').onchange=()=>{updUn();upd();};$('#sQtd').oninput=upd;$('#sPreco').oninput=upd;
+  $('#sSalvar').onclick=()=>{
+    const itemId=$('#sItem').value;const data=$('#sData').value;
+    const q=num($('#sQtd').value);const p=num($('#sPreco').value);
+    if(!itemId){toast('Escolha o item','err');return;}
+    if(!data){toast('Informe a data da compra','err');return;}
+    if(!(q>0)){toast('Informe a quantidade','err');return;}
+    if(!(p>0)){toast('Informe o preço','err');return;}
+    const row={data,itemId,qtd:r2(q),preco:r2(p),local:$('#sLocal').value.trim()};
+    if(novo){addLocal('supCompras',{id:uid(),criadoEm:new Date().toISOString(),...row});toast(`🛒 Compra registrada — ${brl(r2(p/q))} por ${unDe(itemId)}`,'ok');}
+    else{updLocal('supCompras',r.id,row);toast('✅ Compra atualizada','ok');}
+    closeModal();render();};
+}
+
+/* ---- form categoria da casa ---- */
+function formSupCat(c){
+  const novo=!c;
+  openModal(`<div class="modal-h"><h2>${novo?'🏷️ Nova categoria da casa':'✏️ Editar categoria'}</h2><button class="iconbtn" onclick="closeModal()">${ic('x')}</button></div>
+  <div class="field"><label>Nome</label><input class="input" id="scNome" placeholder="ex.: Limpeza, Higiene, Alimentação…" value="${esc(c?c.nome:'')}"></div>
+  <div class="field"><label>Ícone</label><div class="emoji-grid" id="scEmoji">${EMOJIS.map(e=>`<button type="button" class="${(c?c.icone:'📦')===e?'on':''}" data-e="${e}">${e}</button>`).join('')}</div></div>
+  <div class="field"><label>Cor</label>${swatchHTML(c?c.cor:PALETA[2])}</div>
+  <div class="modal-f"><button class="btn btn-ghost" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" id="scSalvar">${ic('check')} ${novo?'Criar':'Salvar'}</button></div>`);
+  wireSwatches();let curEm=c?c.icone:'📦';
+  document.querySelectorAll('#scEmoji [data-e]').forEach(b=>b.onclick=()=>{curEm=b.dataset.e;
+    document.querySelectorAll('#scEmoji [data-e]').forEach(x=>x.classList.toggle('on',x===b));});
+  document.getElementById('scSalvar').onclick=()=>{
+    const nome=document.getElementById('scNome').value.trim();if(!nome){toast('Dê um nome à categoria','err');return;}
+    const row={nome,icone:curEm,cor:document.getElementById('cor').value};
+    if(novo)addLocal('supCats',Object.assign({id:uid(),criadoEm:new Date().toISOString()},row));
+    else updLocal('supCats',c.id,row);
+    toast(novo?'✅ Categoria criada':'✅ Categoria atualizada','ok');closeModal();render();};
+}
+
+/* ---- suprimentos de exemplo (chamado pelo criarDemo) ---- */
+function supDemo(){
+  if(S.supItens.length)return;
+  seedSupCats();
+  const cat=n=>{const c=S.supCats.find(x=>x.nome===n);return c?c.id:null;};
+  const seg=mondayOf(todayISO());const hoje=todayISO();
+  const dSem=(w,d)=>{let x=addDaysISO(seg,-7*w+d);if(x>hoje)x=addDaysISO(x,-7);return x;};
+  const dMes=(mAgo,day)=>{const t=new Date();return toISO(new Date(t.getFullYear(),t.getMonth()-mAgo,Math.min(day,28)));};
+  const LOCAIS=['Mercado do bairro','Atacadão','Assaí'];
+  const mkI=(nome,catN,un,consumoMes,compras)=>{
+    const id=uid();
+    addLocal('supItens',{id,criadoEm:new Date().toISOString(),nome,catId:cat(catN),un,consumoMes,observacoes:''});
+    compras.forEach(([dt,qtd,pu],ix)=>addLocal('supCompras',{id:uid(),criadoEm:new Date().toISOString(),data:dt,itemId:id,qtd,preco:r2(qtd*pu),local:LOCAIS[ix%LOCAIS.length]}));};
+  mkI('Arroz tipo 1 (5 kg)','Alimentação','kg',8,[[dMes(2,20),5,24.9],[dMes(1,18),5,23.9],[dSem(1,1),5,25.9]]);
+  mkI('Feijão carioca (1 kg)','Alimentação','kg',3,[[dMes(2,15),2,8.49],[dMes(1,12),3,8.9],[dSem(1,2),2,7.99]]);
+  mkI('Café torrado e moído 500 g','Alimentação','pct',2,[[dMes(1,20),2,18.9],[dSem(2,2),2,19.9]]);
+  mkI('Detergente neutro 500 ml','Limpeza','un',3,[[dMes(2,25),4,2.79],[dMes(1,22),4,2.99],[dSem(1,2),6,3.29]]);
+  mkI('Sabão em pó 1 kg','Limpeza','un',1.5,[[dMes(2,10),2,15.9],[dSem(3,2),2,16.5]]);
+  mkI('Desinfetante 2 L','Limpeza','un',2,[[dMes(1,15),2,9.9],[dSem(1,3),2,9.5]]);
+  mkI('Papel higiênico 12 rolos','Higiene','pct',1.5,[[dMes(2,8),2,21.9],[dMes(1,8),2,23.5],[dSem(0,0),1,24.9]]);
+  mkI('Sabonete pack 5 un','Higiene','pct',2,[[dMes(1,25),3,11.5],[dSem(2,1),3,11.9]]);
+  mkI('Creme dental 90 g','Higiene','un',2,[[dMes(2,5),3,7.9],[dMes(1,5),2,8.49],[dSem(1,4),1,7.79]]);
+  mkI('Areia sanitária 4 kg','Pet','un',6,[[dMes(2,12),2,18.9],[dMes(1,14),3,19.9],[dSem(1,1),2,21.5]]);
+  toast('🧺 10 itens de casa criados, com compras nas últimas semanas e meses','ok',4200);
+}
+
+
 'use strict';
 /* ============ Mar Aberto · modais, formulários, configurações, demo, boot ============ */
 
@@ -1637,19 +1959,38 @@ create table if not exists racoes (
   "kgRestante" numeric, "custoTotal" numeric, "lancamentoId" uuid,
   observacoes text default '', "criadoEm" timestamptz default now());
 
+create table if not exists "supCats" (
+  id uuid primary key, nome text not null, icone text default '📦',
+  cor text default '#5C93A6', sistema boolean default false,
+  "criadoEm" timestamptz default now());
+create table if not exists "supItens" (
+  id uuid primary key, nome text not null, "catId" uuid, un text default 'un',
+  "consumoMes" numeric default 0, observacoes text default '',
+  "criadoEm" timestamptz default now());
+create table if not exists "supCompras" (
+  id uuid primary key, data date not null, "itemId" uuid,
+  qtd numeric default 0, preco numeric default 0, local text default '',
+  "criadoEm" timestamptz default now());
+
 alter table contas enable row level security;
 alter table cartoes enable row level security;
 alter table categorias enable row level security;
 alter table lancamentos enable row level security;
 alter table racoes enable row level security;
+alter table "supCats" enable row level security;
+alter table "supItens" enable row level security;
+alter table "supCompras" enable row level security;
 create policy "anon total contas" on contas for all to anon using (true) with check (true);
 create policy "anon total cartoes" on cartoes for all to anon using (true) with check (true);
 create policy "anon total categorias" on categorias for all to anon using (true) with check (true);
 create policy "anon total lancamentos" on lancamentos for all to anon using (true) with check (true);
-create policy "anon total racoes" on racoes for all to anon using (true) with check (true);`;
+create policy "anon total racoes" on racoes for all to anon using (true) with check (true);
+create policy "anon total "supCats"" on "supCats" for all to anon using (true) with check (true);
+create policy "anon total "supItens"" on "supItens" for all to anon using (true) with check (true);
+create policy "anon total "supCompras"" on "supCompras" for all to anon using (true) with check (true);`;
 
-/* para quem já criou as tabelas antes das atualizações (pré-pagos e rações) */
-const SQL_MIGRA=`-- Mar Aberto · atualizações: cartões pré-pagos + aba Rações
+/* para quem já criou as tabelas antes das atualizações (pré-pagos, rações e suprimentos) */
+const SQL_MIGRA=`-- Mar Aberto · atualizações: cartões pré-pagos + abas Rações e Suprimentos
 -- Roda sem problema mesmo se as colunas/tabelas já existirem.
 alter table cartoes add column if not exists tipo text default 'credito';
 alter table cartoes add column if not exists "saldoInicial" numeric default 0;
@@ -1662,6 +2003,31 @@ create table if not exists racoes (
 alter table racoes enable row level security;
 do $$ begin
   create policy "anon total racoes" on racoes for all to anon using (true) with check (true);
+exception when duplicate_object then null; end $$;
+
+create table if not exists "supCats" (
+  id uuid primary key, nome text not null, icone text default '📦',
+  cor text default '#5C93A6', sistema boolean default false,
+  "criadoEm" timestamptz default now());
+create table if not exists "supItens" (
+  id uuid primary key, nome text not null, "catId" uuid, un text default 'un',
+  "consumoMes" numeric default 0, observacoes text default '',
+  "criadoEm" timestamptz default now());
+create table if not exists "supCompras" (
+  id uuid primary key, data date not null, "itemId" uuid,
+  qtd numeric default 0, preco numeric default 0, local text default '',
+  "criadoEm" timestamptz default now());
+alter table "supCats" enable row level security;
+alter table "supItens" enable row level security;
+alter table "supCompras" enable row level security;
+do $$ begin
+  create policy "anon total "supCats"" on "supCats" for all to anon using (true) with check (true);
+exception when duplicate_object then null; end $$;
+do $$ begin
+  create policy "anon total "supItens"" on "supItens" for all to anon using (true) with check (true);
+exception when duplicate_object then null; end $$;
+do $$ begin
+  create policy "anon total "supCompras"" on "supCompras" for all to anon using (true) with check (true);
 exception when duplicate_object then null; end $$;`;
 
 function formConfig(){
@@ -1701,7 +2067,7 @@ function formConfig(){
       <button class="btn btn-soft btn-sm" id="bkDemo">✨ Dados de exemplo</button>
       <button class="btn btn-danger btn-sm" id="bkZerar">🧹 Zerar tudo</button>
     </div>
-    <p class="muted" style="margin-top:8px">Backup inclui contas, cartões, categorias e lançamentos. Com o Supabase conectado, restaurar envia os dados para lá também.</p>
+    <p class="muted" style="margin-top:8px">Backup inclui tudo: contas, cartões, categorias, lançamentos, rações e suprimentos (itens, compras e categorias da casa). Com o Supabase conectado, restaurar envia os dados para lá também.</p>
   </div>`);
   $('#sbSalvar').onclick=async()=>{
     const url=$('#sbUrl').value.trim(),key=$('#sbKey').value.trim();
@@ -1723,19 +2089,20 @@ function formConfig(){
       cv.getContext('2d').drawImage(img,0,0,cv.width,cv.height);S.settings.logo=cv.toDataURL('image/png');
       persistLocal();renderBrand();toast('✅ Logo atualizado','ok');formConfig();};img.src=rd.result;};rd.readAsDataURL(f);};
   const lr=$('#logoReset');if(lr)lr.onclick=()=>{S.settings.logo=null;persistLocal();renderBrand();formConfig();};
-  $('#bkExport').onclick=()=>{baixarArquivo('mar-aberto-backup-'+todayISO()+'.json',new Blob([JSON.stringify({contas:S.contas,cartoes:S.cartoes,categorias:S.categorias,lancamentos:S.lancamentos,racoes:S.racoes,settings:S.settings},null,1)],{type:'application/json'}));toast('Backup gerado ✔','ok');};
+  $('#bkExport').onclick=()=>{baixarArquivo('mar-aberto-backup-'+todayISO()+'.json',new Blob([JSON.stringify({contas:S.contas,cartoes:S.cartoes,categorias:S.categorias,lancamentos:S.lancamentos,racoes:S.racoes,supCats:S.supCats,supItens:S.supItens,supCompras:S.supCompras,settings:S.settings},null,1)],{type:'application/json'}));toast('Backup gerado ✔','ok');};
   $('#bkImport').onchange=e=>{const f=e.target.files[0];if(!f)return;const rd=new FileReader();
     rd.onload=async()=>{try{const d=JSON.parse(rd.result);
-      if(await confirmAcao('Restaurar backup?',`Vai substituir os dados atuais por: <b>${(d.contas||[]).length} contas · ${(d.cartoes||[]).length} cartões · ${(d.categorias||[]).length} categorias · ${(d.lancamentos||[]).length} lançamentos · ${(d.racoes||[]).length} rações</b>.`,'Restaurar')){
+      if(await confirmAcao('Restaurar backup?',`Vai substituir os dados atuais por: <b>${(d.contas||[]).length} contas · ${(d.cartoes||[]).length} cartões · ${(d.categorias||[]).length} categorias · ${(d.lancamentos||[]).length} lançamentos · ${(d.racoes||[]).length} rações · ${(d.supItens||[]).length} itens de casa</b>.`,'Restaurar')){
         S.contas=d.contas||[];S.cartoes=d.cartoes||[];S.categorias=d.categorias||[];S.lancamentos=d.lancamentos||[];S.racoes=d.racoes||[];
+        S.supCats=d.supCats||[];S.supItens=d.supItens||[];S.supCompras=d.supCompras||[];
         if(d.settings)S.settings=Object.assign(S.settings,d.settings);persistLocal();
         const c=SB.cfg();if(c){toast('Enviando ao Supabase…');for(const t of TABLES)await SB.upsert(c,t,(S[t]||[]).map(cleanRow));}
         toast('✅ Backup restaurado','ok');closeModal();render();}}catch(err){toast('Arquivo inválido: '+err.message,'err');}};
     rd.readAsText(f);};
   $('#bkDemo').onclick=()=>{closeModal();criarDemo();};
   $('#bkZerar').onclick=async()=>{
-    if(await confirmAcao('Zerar todos os dados?','Isso apaga <b>contas, cartões, categorias, lançamentos e rações</b> deste navegador.'+(SB.cfg()?' O que já está no Supabase continua lá; ao reconectar, o app puxa os dados de volta.':''),'Apagar tudo')){
-      S.contas=[];S.cartoes=[];S.categorias=[];S.lancamentos=[];S.racoes=[];persistLocal();seedCategorias();toast('Dados zerados','ok');closeModal();render();}};
+    if(await confirmAcao('Zerar todos os dados?','Isso apaga <b>contas, cartões, categorias, lançamentos, rações e suprimentos</b> deste navegador.'+(SB.cfg()?' O que já está no Supabase continua lá; ao reconectar, o app puxa os dados de volta.':''),'Apagar tudo')){
+      S.contas=[];S.cartoes=[];S.categorias=[];S.lancamentos=[];S.racoes=[];S.supCats=[];S.supItens=[];S.supCompras=[];persistLocal();seedCategorias();seedSupCats();toast('Dados zerados','ok');closeModal();render();}};
 }
 
 /* ---- seed categorias ---- */
@@ -1745,7 +2112,7 @@ function seedCategorias(){if(S.categorias.length)return;let i=0;
 
 /* ---- dados de exemplo ---- */
 function criarDemo(){
-  confirmAcao('Criar dados de exemplo?',`Vou cadastrar <b>3 contas</b> (sua, da sua esposa e da filha), <b>3 cartões</b> — 2 de crédito e 1 pré-pago de alimentação — <b>mais de 100 lançamentos</b> (com compra parcelada em 6×) e <b>4 rações</b> para a aba 🐾 (gatos, cães e coelhos, uma com compra vinculada). Depois é só editar ou zerar em Configurações.`,'Criar exemplos').then(ok=>{
+  confirmAcao('Criar dados de exemplo?',`Vou cadastrar <b>3 contas</b> (sua, da sua esposa e da filha), <b>3 cartões</b> — 2 de crédito e 1 pré-pago de alimentação — <b>mais de 100 lançamentos</b> (com compra parcelada em 6×), <b>4 rações</b> na aba 🐾 (gatos, cães e coelhos, uma com compra vinculada) e <b>10 itens de casa</b> na aba 🧺 Suprimentos (com compras e preços para as comparações). Depois é só editar ou zerar em Configurações.`,'Criar exemplos').then(ok=>{
     if(!ok)return;
     seedCategorias();
     const cat=n=>(S.categorias.find(c=>c.nome.startsWith(n))||{}).id;
@@ -1790,8 +2157,9 @@ function criarDemo(){
     L.forEach(l=>addLocal('lancamentos',l));
     persistLocal();
     racoesDemo();
+    supDemo();
     persistLocal();
-    toast('✨ Exemplos criados! Explore o Resumo, a Projeção (+30 dias) e os Relatórios.','ok',5000);
+    toast('✨ Exemplos criados! Explore o Resumo, a Projeção (+30 dias), os Relatórios, 🐾 Rações e 🧺 Suprimentos.','ok',5000);
     goAba('resumo');});
 }
 
@@ -1799,6 +2167,7 @@ function criarDemo(){
 function init(){
   loadLocal();
   if(!S.categorias.length&&!SB.cfg())seedCategorias();
+  seedSupCats();
   renderBrand();
   $$('.snav').forEach(b=>b.onclick=()=>goAba(b.dataset.aba));
   $$('.ptab[data-frente]').forEach(b=>b.onclick=()=>goFrente(b.dataset.frente));
