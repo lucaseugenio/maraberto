@@ -410,9 +410,9 @@ const CATS_SEED=[
 
 /* ---- estado ---- */
 const LS_KEY='marAberto_v1';
-let S={contas:[],cartoes:[],categorias:[],lancamentos:[],racoes:[],supCats:[],supItens:[],supCompras:[],settings:{membros:['Eu','Esposa','Filha'],logo:null},ui:{aba:'resumo',frente:'financeiro',racaoView:'gantt',supView:'itens'}};
-function persistLocal(){try{localStorage.setItem(LS_KEY,JSON.stringify({contas:S.contas,cartoes:S.cartoes,categorias:S.categorias,lancamentos:S.lancamentos,racoes:S.racoes,supCats:S.supCats,supItens:S.supItens,supCompras:S.supCompras,settings:S.settings}));}catch(e){console.warn('localStorage cheio/indisponível',e);}}
-function loadLocal(){try{const d=JSON.parse(localStorage.getItem(LS_KEY)||'null');if(d){S.contas=d.contas||[];S.cartoes=d.cartoes||[];S.categorias=d.categorias||[];S.lancamentos=d.lancamentos||[];S.racoes=d.racoes||[];S.supCats=d.supCats||[];S.supItens=d.supItens||[];S.supCompras=d.supCompras||[];S.settings=Object.assign({membros:['Eu','Esposa','Filha'],logo:null},d.settings||{});}}catch(e){console.warn('dados locais corrompidos',e);}}
+let S={contas:[],cartoes:[],categorias:[],lancamentos:[],racoes:[],racCats:[],supCats:[],supItens:[],supCompras:[],settings:{membros:['Eu','Esposa','Filha'],logo:null},ui:{aba:'resumo',frente:'financeiro',racaoView:'gantt',supView:'itens'}};
+function persistLocal(){try{localStorage.setItem(LS_KEY,JSON.stringify({contas:S.contas,cartoes:S.cartoes,categorias:S.categorias,lancamentos:S.lancamentos,racoes:S.racoes,racCats:S.racCats,supCats:S.supCats,supItens:S.supItens,supCompras:S.supCompras,settings:S.settings}));}catch(e){console.warn('localStorage cheio/indisponível',e);}}
+function loadLocal(){try{const d=JSON.parse(localStorage.getItem(LS_KEY)||'null');if(d){S.contas=d.contas||[];S.cartoes=d.cartoes||[];S.categorias=d.categorias||[];S.lancamentos=d.lancamentos||[];S.racoes=d.racoes||[];S.racCats=d.racCats||[];S.supCats=d.supCats||[];S.supItens=d.supItens||[];S.supCompras=d.supCompras||[];S.settings=Object.assign({membros:['Eu','Esposa','Filha'],logo:null},d.settings||{});}}catch(e){console.warn('dados locais corrompidos',e);}}
 
 /* ---- Supabase (REST direto, sem dependências) ---- */
 /* SUPABASE_PRESET é injetado no build (src/supabase_config.json) quando o usuário
@@ -440,13 +440,13 @@ const SB={
   upsert(c,t,rows){return this.req(c,'POST',t+'?on_conflict=id',rows,'resolution=merge-duplicates');},
   async ping(c){const r=await fetch(c.url.replace(/\/+$/,'')+'/rest/v1/contas?select=id&limit=1',{headers:{apikey:c.key,Authorization:'Bearer '+c.key}});if(!r.ok)throw new Error('HTTP '+r.status);return true;}
 };
-const TABLES=['contas','cartoes','categorias','lancamentos','racoes','supCats','supItens','supCompras'];
+const TABLES=['contas','cartoes','categorias','lancamentos','racoes','racCats','supCats','supItens','supCompras'];
 function cleanRow(o){const{...rest}=o;delete rest._local;return rest;}
 async function syncRemoto(fn,okMsg){const c=SB.cfg();if(!c)return;try{await fn(c);}catch(e){console.warn(e);toast('⚠️ Salvo localmente, mas falhou no Supabase: '+e.message,'warn',4200);}}
 async function pullRemoto(){
   const c=SB.cfg();if(!c)return;
   const localAntes={};for(const t of TABLES)localAntes[t]=S[t]||[];
-  const dados={};const faltam=[];const nomeT={racoes:'rações',supCats:'categorias da casa',supItens:'itens da casa',supCompras:'compras da casa'};
+  const dados={};const faltam=[];const nomeT={racoes:'rações',racCats:'categorias de rações',supCats:'categorias da casa',supItens:'itens da casa',supCompras:'compras da casa'};
   for(const t of TABLES){try{dados[t]=await SB.list(c,t)||[];}catch(e){
     // tabela ainda não criada (ex.: racoes/suprimentos antes da migração) → mantém os dados locais, não apaga nada
     dados[t]=localAntes[t].slice();faltam.push(t);}}
@@ -460,6 +460,9 @@ async function pullRemoto(){
   S.supCats=(dados.supCats||[]).map(r=>({...r}));
   S.supItens=(dados.supItens||[]).map(r=>({...r,consumoMes:r2(r.consumoMes||0)}));
   S.supCompras=(dados.supCompras||[]).map(r=>({...r,qtd:r2(r.qtd||0),preco:r2(r.preco||0)}));
+  // categorias de ração: backfill automático das rações antigas (uma categoria por nome)
+  const podesync=!faltam.includes('racoes')&&!faltam.includes('racCats');
+  migRacCats(podesync);
   // migração: tabela remota vazia + dados locais → envia (e mantém os dados na tela)
   let migrou=false;
   for(const t of TABLES){
@@ -488,6 +491,23 @@ const racaoById=id=>S.racoes.find(r=>r.id===id);
 
 /* ---- Rações (proteção animal) ---- */
 const ESPECIES=[{k:'gatos',n:'Gatos',e:'🐱',cor:'#5C93A6'},{k:'caes',n:'Cães',e:'🐶',cor:'#E09A85'},{k:'coelhos',n:'Coelhos',e:'🐰',cor:'#A9A3D8'}];
+const racCatById=id=>S.racCats.find(c=>c.id===id);
+/* categorias de ração: uma linha do Gantt por categoria.
+   Backfill: rações antigas (sem catId) ganham uma categoria com o próprio nome — roda só quando existem rações órfãs,
+   então categorias excluídas depois não são recriadas (a ração fica como "Sem categoria"). */
+function migRacCats(pushOk){
+  const sem=S.racoes.filter(r=>r.catId==null||r.catId==='');
+  if(!sem.length)return false;
+  for(const r of sem){
+    const ex=S.racCats.find(c=>c.nome.toLowerCase()===r.nome.toLowerCase());
+    if(ex){r.catId=ex.id;continue;}
+    const esp=espBy(r.especie);
+    const cat={id:uid(),criadoEm:new Date().toISOString(),nome:r.nome,icone:(esp&&esp.e)||'🐾',cor:(esp&&esp.cor)||'#7FB88C'};
+    S.racCats.push(cat);r.catId=cat.id;}
+  if(pushOk&&SB.cfg()){const c=SB.cfg();
+    SB.upsert(c,'racCats',S.racCats.map(cleanRow)).catch(e=>console.warn('racCats',e));
+    SB.upsert(c,'racoes',sem.map(cleanRow)).catch(e=>console.warn('racoes',e));}
+  return true;}
 const espBy=k=>ESPECIES.find(x=>x.k===k)||ESPECIES[0];
 function racaoDias(a,b){return Math.max(1,Math.round((parseISO(b).getTime()-parseISO(a).getTime())/864e5)+1);}
 function racaoFimEfetivo(r){return r.fim||todayISO();}
@@ -1153,7 +1173,7 @@ function renderRacoes(v){
   const mk=monthKey(todayISO());const mes=racoesMensal([mk])[0];
   const custoTotal=S.racoes.reduce((s,r)=>s+racaoCusto(r),0);
   const estoque=S.racoes.reduce((s,r)=>s+(r.kgRestante!=null?Math.max(0,r2(r.kg-(r.kgRestante||0))):0),0);
-  const views=[['gantt','🗺️ Gantt'],['mensal','📊 Consumo mensal'],['especies','🐾 Por espécie'],['lista','📋 Todas']];
+  const views=[['gantt','🗺️ Gantt'],['mensal','📊 Consumo mensal'],['especies','🐾 Por espécie'],['lista','📋 Todas'],['cats','🏷️ Categorias']];
   const semDados=!S.racoes.length;
   v.innerHTML=`${secHead('🐾 Rações','Acompanhamento do consumo das rações da proteção animal — gatos, cães e coelhos: quando cada saco abriu, quanto dura e quanto custa.',
     `<button class="btn btn-primary" data-newracao>${ic('plus')} Nova ração</button>`)}
@@ -1165,7 +1185,7 @@ function renderRacoes(v){
     ${kpi('t-amber','📦','Estoque pesado',estoque>0?fmtKg(estoque):'—','kg restantes nas pesagens registradas')}
   </div>
   <div class="seg" id="segRacaoView" style="margin-bottom:16px">${views.map(([k,n])=>`<button type="button" data-v="${k}" class="${(S.ui.racaoView||'gantt')===k?'on':''}">${n}</button>`).join('')}</div>
-  <div id="racaoView">${({gantt:ganttRacoes,mensal:mensalRacoes,especies:especiesRacoes,lista:listaRacoes})[S.ui.racaoView||'gantt']()}</div>`;
+  <div id="racaoView">${({gantt:ganttRacoes,mensal:mensalRacoes,especies:especiesRacoes,lista:listaRacoes,cats:catsRacoes})[S.ui.racaoView||'gantt']()}</div>`;
   v.querySelectorAll('#segRacaoView [data-v]').forEach(b=>b.onclick=()=>{S.ui.racaoView=b.dataset.v;render();});
   v.querySelectorAll('[data-newracao]').forEach(b=>b.onclick=()=>formRacao());
   v.querySelectorAll('[data-editracao]').forEach(b=>b.onclick=()=>{const r=racaoById(b.dataset.editracao);if(r)formRacao(r);});
@@ -1173,39 +1193,66 @@ function renderRacoes(v){
     const r=racaoById(b.dataset.delracao);if(!r)return;
     if(await confirmAcao('Excluir ração?',`<b>${esc(r.nome)}</b> · ${fmtKg(r.kg)} · aberta ${fmtDataCurta(r.abertura)}`,'Excluir')){
       delLocal('racoes',r.id);toast('Ração excluída','ok');render();}});
+  v.querySelectorAll('[data-newraccat]').forEach(b=>b.onclick=()=>formRacCat());
+  v.querySelectorAll('[data-editraccat]').forEach(b=>b.onclick=()=>{const c=racCatById(b.dataset.editraccat);if(c)formRacCat(c);});
+  v.querySelectorAll('[data-delraccat]').forEach(b=>b.onclick=async()=>{
+    const c=racCatById(b.dataset.delraccat);if(!c)return;
+    const usos=S.racoes.filter(r=>r.catId===c.id).length;
+    if(await confirmAcao('Excluir categoria?',`<b>${esc(c.nome)}</b>${usos?` — as <b>${usos} ração(ões)</b> dela vão aparecer como <b>Sem categoria</b> no Gantt (uma linha própria).`:''}`,'Excluir')){
+      delLocal('racCats',c.id);toast('Categoria excluída','ok');render();}});
   v.querySelectorAll('[data-racaodemo]').forEach(b=>b.onclick=()=>racoesDemo());
 }
 
-/* ---- Gantt: cada ração é uma barra da abertura ao fim (em uso vai até hoje) ---- */
+/* ---- Gantt: uma linha por categoria; os sacos da mesma categoria seguem na mesma linha ---- */
 function ganttRacoes(){
-  const rows=[...S.racoes].sort((a,b)=>a.abertura<b.abertura?-1:1);
-  if(!rows.length)return `<div class="card"><div class="empty" style="padding:22px"><span class="em">🗺️</span><b>Sem rações ainda</b>Cadastre a primeira ração para ver a linha do tempo do consumo.</div></div>`;
+  if(!S.racoes.length)return `<div class="card"><div class="empty" style="padding:22px"><span class="em">🗺️</span><b>Sem rações ainda</b>Cadastre a primeira ração para ver a linha do tempo do consumo.</div></div>`;
   const hoje=todayISO();
-  const t0=rows.reduce((m,r)=>r.abertura<m?r.abertura:m,hoje).slice(0,7)+'-01';
-  const t1raw=rows.reduce((m,r)=>{const f=racaoFimEfetivo(r);return f>m?f:m;},hoje);
+  const linhas=[...S.racCats].filter(c=>S.racoes.some(r=>r.catId===c.id))
+    .sort((a,b)=>a.nome.toLowerCase()<b.nome.toLowerCase()?-1:1)
+    .map(c=>({cat:c,rs:S.racoes.filter(r=>r.catId===c.id).sort((a,b)=>a.abertura<b.abertura?-1:1)}));
+  const orfas=S.racoes.filter(r=>!r.catId||!racCatById(r.catId)).sort((a,b)=>a.abertura<b.abertura?-1:1);
+  if(orfas.length)linhas.push({cat:null,rs:orfas});
+  const todas=linhas.flatMap(l=>l.rs);
+  const t0=todas.reduce((m,r)=>r.abertura<m?r.abertura:m,hoje).slice(0,7)+'-01';
+  const t1raw=todas.reduce((m,r)=>{const f=racaoFimEfetivo(r);return f>m?f:m;},hoje);
   const t1=monthEndISO(t1raw);
   const d0=parseISO(t0).getTime(),d1=parseISO(t1).getTime()+864e5;const span=Math.max(1,d1-d0);
   const ms=[];let y=+t0.slice(0,4),m=+t0.slice(5,7);const fim=+t1.slice(0,4)*100+ +t1.slice(5,7);
   while(y*100+m<=fim){ms.push(`${y}-${String(m).padStart(2,'0')}`);m++;if(m>12){m=1;y++;}}
   const diasMes=mk=>racaoDias(mk+'-01',monthEndISO(mk+'-01'));
   const head=`<div style="display:flex;min-width:640px;border-bottom:1px solid var(--line)">
-    <div style="width:150px;min-width:150px"></div>
+    <div style="width:170px;min-width:170px"></div>
     <div style="flex:1;display:flex">${ms.map(mk=>`<div style="flex:${diasMes(mk)};text-align:center;font-size:.72rem;font-weight:800;color:var(--ink-faint);border-left:1px solid var(--line-soft);padding:4px 0">${fmtMes(mk)}</div>`).join('')}</div></div>`;
   const xHoje=(parseISO(hoje).getTime()+864e5-d0)/span*100;
   const linhaHoje=(xHoje>0&&xHoje<100)?`<div style="position:absolute;top:0;bottom:0;left:${xHoje}%;width:2px;background:var(--coral);opacity:.55;pointer-events:none" title="hoje"></div>`:'';
-  const body=rows.map(r=>{const esp=espBy(r.especie);const fe=racaoFimEfetivo(r);
-    const left=(parseISO(r.abertura).getTime()-d0)/span*100;
-    const width=(parseISO(fe).getTime()+864e5-parseISO(r.abertura).getTime())/span*100;
-    const kgd=racaoKgDia(r);
+  const body=linhas.map(l=>{const cor=l.cat?(l.cat.cor||'#7FB88C'):'#9AA5B1';const icone=l.cat?(l.cat.icone||'🐾'):'📦';
+    let lastFim=null;
+    const barras=l.rs.map(r=>{const fe=racaoFimEfetivo(r);
+      const left=(parseISO(r.abertura).getTime()-d0)/span*100;
+      const width=(parseISO(fe).getTime()+864e5-parseISO(r.abertura).getTime())/span*100;
+      const kgd=racaoKgDia(r);
+      const sobrepoe=lastFim&&r.abertura<lastFim;lastFim=fe;
+      return `<div style="position:absolute;left:${left}%;width:${Math.max(width,.6)}%;${sobrepoe?'top:23px;height:15px;':'top:7px;bottom:7px;'}background:linear-gradient(100deg,${cor},${cor}b3);border-radius:9px;color:#fff;font-size:.72rem;font-weight:800;display:flex;align-items:center;padding:0 9px;white-space:nowrap;overflow:hidden;box-shadow:var(--shadow);${r.fim?'':'border-right:3px dashed rgba(255,255,255,.92)'}" title="${esc(r.nome)} · ${fmtKg(r.kg)} · ${fmtDataCurta(r.abertura)} → ${r.fim?fmtDataCurta(fe):'em uso'}${kgd!=null?` · ~${fmtKg(kgd)}/dia`:''}">${esc(r.nome)} · ${fmtKg(r.kg)}${r.fim?'':' · em uso'}</div>`;}).join('');
+    const nome=l.cat?l.cat.nome:'Sem categoria';
     return `<div style="display:flex;align-items:center;min-width:640px;border-top:1px dashed var(--line-soft)">
-      <div style="width:150px;min-width:150px;font-size:.8rem;font-weight:800;padding:7px 8px 7px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(r.nome)}">${esp.e} ${esc(r.nome)}</div>
-      <div style="flex:1;position:relative;height:42px">
-        ${linhaHoje}
-        <div style="position:absolute;left:${left}%;width:${Math.max(width,.6)}%;top:7px;bottom:7px;background:linear-gradient(100deg,${esp.cor},${esp.cor}b3);border-radius:9px;color:#fff;font-size:.72rem;font-weight:800;display:flex;align-items:center;padding:0 9px;white-space:nowrap;overflow:hidden;box-shadow:var(--shadow);${r.fim?'':'border-right:3px dashed rgba(255,255,255,.92)'}" title="${esc(r.nome)} · ${fmtKg(r.kg)} · ${r.fim?'finalizada':'em uso'}${kgd!=null?` · ~${fmtKg(kgd)}/dia`:''}">${esc(r.nome)} · ${fmtKg(r.kg)}${r.fim?'':' · em uso'}</div>
-      </div></div>`;}).join('');
-  return `<div class="card"><div class="card-h"><h3>🗺️ Linha do tempo (Gantt)</h3><span class="hint">cada barra é uma ração — da abertura ao fim</span></div>
+      <div style="width:170px;min-width:170px;font-size:.8rem;font-weight:800;padding:7px 8px 7px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(nome)}"><span style="display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:7px;background:${hexSoft(cor,.2)};font-size:.85rem;margin-right:6px;vertical-align:middle">${icone}</span>${esc(nome)} <small style="color:var(--ink-faint);font-weight:800">· ${l.rs.length}</small></div>
+      <div style="flex:1;position:relative;height:42px">${linhaHoje}${barras}</div></div>`;}).join('');
+  return `<div class="card"><div class="card-h"><h3>🗺️ Linha do tempo (Gantt)</h3><span class="hint">uma linha por 🏷️ categoria — os sacos dela aparecem em sequência</span></div>
     <div style="overflow-x:auto">${head}${body}</div>
-    <div class="hint" style="margin-top:8px">A linha coral é hoje. Barra com borda tracejada = ração ainda em uso. Em um celular, arraste para o lado.</div></div>`;
+    <div class="hint" style="margin-top:8px">A linha coral é hoje. Barra com borda tracejada = saco ainda em uso. Cadastre e gerencie as linhas na aba 🏷️ Categorias. Em um celular, arraste para o lado.</div></div>`;
+}
+
+/* ---- categorias de ração (linhas do Gantt) ---- */
+function catsRacoes(){
+  return `<div class="card"><div class="card-h"><h3>🏷️ Categorias de ração</h3><span class="hint">${S.racCats.length} cadastradas · uma linha no Gantt por categoria</span><div class="right"><button class="btn btn-sm btn-primary" data-newraccat>${ic('plus')} Nova categoria</button></div></div>
+  ${S.racCats.length?`<div class="cats-grid">${S.racCats.map(c=>{
+    const rs=S.racoes.filter(r=>r.catId===c.id);
+    const custo=rs.reduce((s,r)=>s+racaoCusto(r),0);
+    const emUso=rs.filter(r=>!r.fim).length;
+    return `<div class="cat-card"><span class="em" style="background:${hexSoft(c.cor,.15)}">${c.icone||'🐾'}</span>
+      <div><b>${esc(c.nome)}</b><small>${rs.length} ração(ões)${emUso?` · ${emUso} em uso`:''}${custo>0?` · ${brl(custo)} em compras`:''}</small></div>
+      <div class="ops"><button class="iconbtn" data-editraccat="${c.id}" title="Editar">${ic('pencil')}</button><button class="iconbtn del" data-delraccat="${c.id}" title="Excluir">${ic('trash')}</button></div></div>`;}).join('')}</div>`
+  :`<div class="empty" style="padding:18px"><span class="em">🏷️</span><b>Nenhuma categoria</b>Crie linhas como “Golden — Gatos” para os sacos seguirem juntos no Gantt.</div>`}</div>`;
 }
 
 /* ---- consumo mensal estimado (últimos 6 meses) ---- */
@@ -1254,7 +1301,8 @@ function listaRacoes(){
     return `<div class="lan-row">
       <div class="data" style="background:${hexSoft(esp.cor,.16)}">${esp.e}<small>${esp.n}</small></div>
       <div class="desc"><b>${esc(r.nome)}</b>
-        <div class="meta-line"><span class="chip" style="background:var(--line-soft)">${fmtKg(r.kg)}</span>
+        <div class="meta-line"><span class="chip" style="background:${hexSoft(racCatById(r.catId)?racCatById(r.catId).cor:'#9AA5B1',.16)}">${racCatById(r.catId)?racCatById(r.catId).icone:'📦'} ${esc(racCatById(r.catId)?racCatById(r.catId).nome:'Sem categoria')}</span>
+          <span class="chip" style="background:var(--line-soft)">${fmtKg(r.kg)}</span>
           <span class="chip" style="background:var(--line-soft)">aberta ${fmtDataCurta(r.abertura)}${r.fim?' · acabou '+fmtDataCurta(r.fim):` · em uso há ${racaoDias(r.abertura,todayISO())} dias`}</span>
           ${kgd!=null?`<span class="chip" style="background:var(--line-soft)">~${fmtKg(kgd)}/dia</span>`:''}
           ${cons!=null?`<span class="chip" style="background:var(--line-soft)">consumido ${fmtKg(cons)}</span>`:''}
@@ -1275,6 +1323,9 @@ function formRacao(l){
   let curEsp=r.especie||'gatos';
   openModal(`<div class="modal-h"><h2>${novo?'🐾 Nova ração':'✏️ Editar ração'}</h2><button class="iconbtn" onclick="closeModal()">${ic('x')}</button></div>
   <div class="field"><label>Nome <span class="opt">(marca + embalagem, ex.: “Golden Gatos 10,1 kg”)</span></label><input class="input" id="rNome" value="${esc(r.nome||'')}" placeholder="ex.: Golden Gatos 10,1 kg"></div>
+  <div class="field"><label>🏷️ Categoria <span class="opt">(a linha que ela segue no Gantt)</span></label>
+    <select class="input" id="rCat">${S.racCats.map(c=>`<option value="${c.id}" ${r.catId===c.id?'selected':''}>${c.icone||'🐾'} ${esc(c.nome)}</option>`).join('')}${S.racCats.length?'':'<option value="">— criar categoria com o nome da ração —</option>'}</select>
+    <div class="hint" style="margin-top:6px">${S.racCats.length?'Vários sacos da mesma categoria aparecem em sequência na mesma linha do Gantt. Cadastre/gerencie em 🏷️ Categorias.':'Ao salvar, uma categoria será criada automaticamente com este nome. Depois gerencie em 🏷️ Categorias.'}</div></div>
   <div class="frow">
     <div class="field"><label>Espécie</label><div class="seg" id="segEsp">${ESPECIES.map(e=>`<button type="button" data-e="${e.k}" class="${curEsp===e.k?'on':''}">${e.e} ${e.n}</button>`).join('')}</div></div>
     <div class="field"><label>Quantidade (kg)</label><input class="input" id="rKg" inputmode="decimal" placeholder="0,0" value="${r.kg!=null?String(r.kg).replace('.',','):''}"></div>
@@ -1311,10 +1362,34 @@ function formRacao(l){
     if(!estaEmUso&&!fim){toast('Informe a data de fim — ou marque que ainda está em uso','err');return;}
     if(fim&&fim<abertura){toast('A data de fim é antes da abertura','err');return;}
     if(temRest&&rest>kg){toast('O peso atual não pode ser maior que o total','err');return;}
-    const row={nome,especie:curEsp,kg:r2(kg),abertura,fim,kgRestante:temRest?r2(rest):null,custoTotal:temCusto?r2(custo):null,lancamentoId:lanc,observacoes:$('#rObs').value.trim()};
+    let catId=$('#rCat')?($('#rCat').value||null):null;
+    if(!catId){const ex=S.racCats.find(c=>c.nome.toLowerCase()===nome.toLowerCase());
+      if(ex)catId=ex.id;
+      else{const esp0=espBy(curEsp);catId=uid();addLocal('racCats',{id:catId,criadoEm:new Date().toISOString(),nome,icone:esp0.e,cor:esp0.cor});}}
+    const row={nome,catId,especie:curEsp,kg:r2(kg),abertura,fim,kgRestante:temRest?r2(rest):null,custoTotal:temCusto?r2(custo):null,lancamentoId:lanc,observacoes:$('#rObs').value.trim()};
     if(novo){addLocal('racoes',{id:uid(),criadoEm:new Date().toISOString(),...row});toast('🐾 Ração aberta! Acompanhe o consumo nas visualizações.','ok');}
     else{updLocal('racoes',r.id,row);toast('✅ Ração atualizada','ok');}
     closeModal();render();};
+}
+
+/* ---- form categoria de ração ---- */
+function formRacCat(c){
+  const novo=!c;
+  openModal(`<div class="modal-h"><h2>${novo?'🏷️ Nova categoria de ração':'✏️ Editar categoria'}</h2><button class="iconbtn" onclick="closeModal()">${ic('x')}</button></div>
+  <div class="field"><label>Nome <span class="opt">(ex.: “Golden — Gatos”, “Ração dos cães”)</span></label><input class="input" id="rcNome" placeholder="ex.: Golden — Gatos" value="${esc(c?c.nome:'')}"></div>
+  <div class="hint" style="margin:-6px 0 12px">Os sacos cadastrados nessa categoria aparecem <b>em sequência na mesma linha</b> do Gantt.</div>
+  <div class="field"><label>Ícone</label><div class="emoji-grid" id="rcEmoji">${EMOJIS.map(e=>`<button type="button" class="${(c?c.icone:'🐾')===e?'on':''}" data-e="${e}">${e}</button>`).join('')}</div></div>
+  <div class="field"><label>Cor</label>${swatchHTML(c?c.cor:PALETA[4])}</div>
+  <div class="modal-f"><button class="btn btn-ghost" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" id="rcSalvar">${ic('check')} ${novo?'Criar':'Salvar'}</button></div>`);
+  wireSwatches();let curEm=c?c.icone:'🐾';
+  document.querySelectorAll('#rcEmoji [data-e]').forEach(b=>b.onclick=()=>{curEm=b.dataset.e;
+    document.querySelectorAll('#rcEmoji [data-e]').forEach(x=>x.classList.toggle('on',x===b));});
+  document.getElementById('rcSalvar').onclick=()=>{
+    const nome=document.getElementById('rcNome').value.trim();if(!nome){toast('Dê um nome à categoria','err');return;}
+    const row={nome,icone:curEm,cor:document.getElementById('cor').value};
+    if(novo)addLocal('racCats',Object.assign({id:uid(),criadoEm:new Date().toISOString()},row));
+    else updLocal('racCats',c.id,row);
+    toast(novo?'✅ Categoria criada — os próximos sacos dela seguem na mesma linha':'✅ Categoria atualizada','ok');closeModal();render();};
 }
 
 /* ---- rações de exemplo (chamado pelo criarDemo) ---- */
@@ -1323,18 +1398,22 @@ function racoesDemo(){
   const t=new Date();
   const mk=(m,day)=>toISO(new Date(t.getFullYear(),t.getMonth()+m,Math.min(day,new Date(t.getFullYear(),t.getMonth()+m+1,0).getDate())));
   const cat=n=>(S.categorias.find(c=>c.nome.startsWith(n))||{}).id;
-  const mkR=(nome,esp,kg,ab,fim,rest,custo,obs)=>({id:uid(),criadoEm:new Date().toISOString(),nome,especie:esp,kg,abertura:mk(...ab),fim:fim?mk(...fim):null,kgRestante:rest,custoTotal:custo,lancamentoId:null,observacoes:obs||''});
+  const cats=[['Golden — Gatos','🐱','#5C93A6'],['GranPlus — Cães','🐶','#E09A85'],['Fibra Plus — Coelhos','🐰','#A9A3D8'],['Whiskas — Sachês','🐱','#5C93A6']];
+  const catId={};
+  for(const[nome,icone,cor]of cats){const id=uid();catId[nome]=id;addLocal('racCats',{id,criadoEm:new Date().toISOString(),nome,icone,cor});}
+  const mkR=(cNome,nome,esp,kg,ab,fim,rest,custo,obs)=>({id:uid(),criadoEm:new Date().toISOString(),nome,catId:catId[cNome],especie:esp,kg,abertura:mk(...ab),fim:fim?mk(...fim):null,kgRestante:rest,custoTotal:custo,lancamentoId:null,observacoes:obs||''});
   const racoes=[
-    mkR('Golden Gatos 10,1 kg','gatos',10.1,[-2,4],[0,2],null,null,'2 gatos + 1 visitante de rua'),
-    mkR('GranPlus Carnes 15 kg','caes',15,[-1,10],null,6.8,159.9,'3 cães — pesagem do dia 12'),
-    mkR('Fibra Plus Coelhos 5 kg','coelhos',5,[-1,20],[0,1],null,54.5,''),
-    mkR('Whiskas Sachê (caixa 12)','gatos',3.6,[0,5],null,null,47.9,'caixa de sachês, sem pesagem')];
+    mkR('Golden — Gatos','Golden Gatos 10,1 kg','gatos',10.1,[-4,10],[-2,3],null,null,'saco anterior — já acabou'),
+    mkR('Golden — Gatos','Golden Gatos 10,1 kg','gatos',10.1,[-2,4],[0,2],null,null,'2 gatos + 1 visitante de rua'),
+    mkR('GranPlus — Cães','GranPlus Carnes 15 kg','caes',15,[-1,10],null,6.8,159.9,'3 cães — pesagem do dia 12'),
+    mkR('Fibra Plus — Coelhos','Fibra Plus Coelhos 5 kg','coelhos',5,[-1,20],[0,1],null,54.5,''),
+    mkR('Whiskas — Sachês','Whiskas Sachê (caixa 12)','gatos',3.6,[0,5],null,null,47.9,'caixa de sachês, sem pesagem')];
   if(S.contas.length){
     const idCompra=uid();
     addLocal('lancamentos',{id:idCompra,criadoEm:new Date().toISOString(),data:mk(-2,3),valor:189.9,tipo:'despesa',contaId:S.contas[0].id,cartaoId:null,categoriaId:cat('Outros gastos'),descricao:'Ração Golden Gatos 10,1 kg',titular:'Eu',pago:true,observacoes:'',grupo:null});
-    racoes[0].lancamentoId=idCompra;}
+    racoes[1].lancamentoId=idCompra;}
   for(const r of racoes)addLocal('racoes',r);
-  toast('🐾 4 rações de exemplo criadas (1 com compra vinculada no Financeiro)','ok',4200);
+  toast('🐾 5 rações em 4 categorias de exemplo (1 com compra vinculada no Financeiro)','ok',4200);
 }
 
 
@@ -1956,8 +2035,11 @@ create table if not exists lancamentos (
 create table if not exists racoes (
   id uuid primary key, nome text not null, especie text default 'gatos',
   kg numeric default 0, abertura date not null, fim date,
-  "kgRestante" numeric, "custoTotal" numeric, "lancamentoId" uuid,
+  "kgRestante" numeric, "custoTotal" numeric, "lancamentoId" uuid, "catId" uuid,
   observacoes text default '', "criadoEm" timestamptz default now());
+create table if not exists "racCats" (
+  id uuid primary key, nome text not null, icone text default '🐾',
+  cor text default '#7FB88C', "criadoEm" timestamptz default now());
 
 create table if not exists "supCats" (
   id uuid primary key, nome text not null, icone text default '📦',
@@ -1977,6 +2059,7 @@ alter table cartoes enable row level security;
 alter table categorias enable row level security;
 alter table lancamentos enable row level security;
 alter table racoes enable row level security;
+alter table "racCats" enable row level security;
 alter table "supCats" enable row level security;
 alter table "supItens" enable row level security;
 alter table "supCompras" enable row level security;
@@ -1986,12 +2069,13 @@ do $$ begin create policy "anon total cartoes" on cartoes for all to anon using 
 do $$ begin create policy "anon total categorias" on categorias for all to anon using (true) with check (true); exception when duplicate_object then null; end $$;
 do $$ begin create policy "anon total lancamentos" on lancamentos for all to anon using (true) with check (true); exception when duplicate_object then null; end $$;
 do $$ begin create policy "anon total racoes" on racoes for all to anon using (true) with check (true); exception when duplicate_object then null; end $$;
+do $$ begin create policy "anon total racCats" on "racCats" for all to anon using (true) with check (true); exception when duplicate_object then null; end $$;
 do $$ begin create policy "anon total supCats" on "supCats" for all to anon using (true) with check (true); exception when duplicate_object then null; end $$;
 do $$ begin create policy "anon total supItens" on "supItens" for all to anon using (true) with check (true); exception when duplicate_object then null; end $$;
 do $$ begin create policy "anon total supCompras" on "supCompras" for all to anon using (true) with check (true); exception when duplicate_object then null; end $$;`;
 
-/* para quem já criou as tabelas antes das atualizações (pré-pagos, rações e suprimentos) */
-const SQL_MIGRA=`-- Mar Aberto · atualizações: cartões pré-pagos + abas Rações e Suprimentos
+/* para quem já criou as tabelas antes das atualizações (pré-pagos, rações+categorias, suprimentos) */
+const SQL_MIGRA=`-- Mar Aberto · atualizações: cartões pré-pagos + abas Rações, Suprimentos e categorias de ração
 -- Roda sem problema mesmo se as colunas/tabelas já existirem.
 alter table cartoes add column if not exists tipo text default 'credito';
 alter table cartoes add column if not exists "saldoInicial" numeric default 0;
@@ -2004,6 +2088,15 @@ create table if not exists racoes (
 alter table racoes enable row level security;
 do $$ begin
   create policy "anon total racoes" on racoes for all to anon using (true) with check (true);
+exception when duplicate_object then null; end $$;
+
+create table if not exists "racCats" (
+  id uuid primary key, nome text not null, icone text default '🐾',
+  cor text default '#7FB88C', "criadoEm" timestamptz default now());
+alter table racoes add column if not exists "catId" uuid;
+alter table "racCats" enable row level security;
+do $$ begin
+  create policy "anon total racCats" on "racCats" for all to anon using (true) with check (true);
 exception when duplicate_object then null; end $$;
 
 create table if not exists "supCats" (
@@ -2090,20 +2183,20 @@ function formConfig(){
       cv.getContext('2d').drawImage(img,0,0,cv.width,cv.height);S.settings.logo=cv.toDataURL('image/png');
       persistLocal();renderBrand();toast('✅ Logo atualizado','ok');formConfig();};img.src=rd.result;};rd.readAsDataURL(f);};
   const lr=$('#logoReset');if(lr)lr.onclick=()=>{S.settings.logo=null;persistLocal();renderBrand();formConfig();};
-  $('#bkExport').onclick=()=>{baixarArquivo('mar-aberto-backup-'+todayISO()+'.json',new Blob([JSON.stringify({contas:S.contas,cartoes:S.cartoes,categorias:S.categorias,lancamentos:S.lancamentos,racoes:S.racoes,supCats:S.supCats,supItens:S.supItens,supCompras:S.supCompras,settings:S.settings},null,1)],{type:'application/json'}));toast('Backup gerado ✔','ok');};
+  $('#bkExport').onclick=()=>{baixarArquivo('mar-aberto-backup-'+todayISO()+'.json',new Blob([JSON.stringify({contas:S.contas,cartoes:S.cartoes,categorias:S.categorias,lancamentos:S.lancamentos,racoes:S.racoes,racCats:S.racCats,supCats:S.supCats,supItens:S.supItens,supCompras:S.supCompras,settings:S.settings},null,1)],{type:'application/json'}));toast('Backup gerado ✔','ok');};
   $('#bkImport').onchange=e=>{const f=e.target.files[0];if(!f)return;const rd=new FileReader();
     rd.onload=async()=>{try{const d=JSON.parse(rd.result);
       if(await confirmAcao('Restaurar backup?',`Vai substituir os dados atuais por: <b>${(d.contas||[]).length} contas · ${(d.cartoes||[]).length} cartões · ${(d.categorias||[]).length} categorias · ${(d.lancamentos||[]).length} lançamentos · ${(d.racoes||[]).length} rações · ${(d.supItens||[]).length} itens de casa</b>.`,'Restaurar')){
         S.contas=d.contas||[];S.cartoes=d.cartoes||[];S.categorias=d.categorias||[];S.lancamentos=d.lancamentos||[];S.racoes=d.racoes||[];
-        S.supCats=d.supCats||[];S.supItens=d.supItens||[];S.supCompras=d.supCompras||[];
-        if(d.settings)S.settings=Object.assign(S.settings,d.settings);persistLocal();
+        S.racCats=d.racCats||[];S.supCats=d.supCats||[];S.supItens=d.supItens||[];S.supCompras=d.supCompras||[];
+        if(d.settings)S.settings=Object.assign(S.settings,d.settings);persistLocal();migRacCats(false);
         const c=SB.cfg();if(c){toast('Enviando ao Supabase…');for(const t of TABLES)await SB.upsert(c,t,(S[t]||[]).map(cleanRow));}
         toast('✅ Backup restaurado','ok');closeModal();render();}}catch(err){toast('Arquivo inválido: '+err.message,'err');}};
     rd.readAsText(f);};
   $('#bkDemo').onclick=()=>{closeModal();criarDemo();};
   $('#bkZerar').onclick=async()=>{
     if(await confirmAcao('Zerar todos os dados?','Isso apaga <b>contas, cartões, categorias, lançamentos, rações e suprimentos</b> deste navegador.'+(SB.cfg()?' O que já está no Supabase continua lá; ao reconectar, o app puxa os dados de volta.':''),'Apagar tudo')){
-      S.contas=[];S.cartoes=[];S.categorias=[];S.lancamentos=[];S.racoes=[];S.supCats=[];S.supItens=[];S.supCompras=[];persistLocal();seedCategorias();seedSupCats();toast('Dados zerados','ok');closeModal();render();}};
+      S.contas=[];S.cartoes=[];S.categorias=[];S.lancamentos=[];S.racoes=[];S.racCats=[];S.supCats=[];S.supItens=[];S.supCompras=[];persistLocal();seedCategorias();seedSupCats();toast('Dados zerados','ok');closeModal();render();}};
 }
 
 /* ---- seed categorias ---- */
@@ -2113,7 +2206,7 @@ function seedCategorias(){if(S.categorias.length)return;let i=0;
 
 /* ---- dados de exemplo ---- */
 function criarDemo(){
-  confirmAcao('Criar dados de exemplo?',`Vou cadastrar <b>3 contas</b> (sua, da sua esposa e da filha), <b>3 cartões</b> — 2 de crédito e 1 pré-pago de alimentação — <b>mais de 100 lançamentos</b> (com compra parcelada em 6×), <b>4 rações</b> na aba 🐾 (gatos, cães e coelhos, uma com compra vinculada) e <b>10 itens de casa</b> na aba 🧺 Suprimentos (com compras e preços para as comparações). Depois é só editar ou zerar em Configurações.`,'Criar exemplos').then(ok=>{
+  confirmAcao('Criar dados de exemplo?',`Vou cadastrar <b>3 contas</b> (sua, da sua esposa e da filha), <b>3 cartões</b> — 2 de crédito e 1 pré-pago de alimentação — <b>mais de 100 lançamentos</b> (com compra parcelada em 6×), <b>5 rações em 4 categorias</b> na aba 🐾 (com duas sacolas seguidas na mesma linha do Gantt e uma compra vinculada) e <b>10 itens de casa</b> na aba 🧺 Suprimentos (com compras e preços para as comparações). Depois é só editar ou zerar em Configurações.`,'Criar exemplos').then(ok=>{
     if(!ok)return;
     seedCategorias();
     const cat=n=>(S.categorias.find(c=>c.nome.startsWith(n))||{}).id;
@@ -2169,6 +2262,7 @@ function init(){
   loadLocal();
   if(!S.categorias.length&&!SB.cfg())seedCategorias();
   seedSupCats();
+  migRacCats(false);
   renderBrand();
   $$('.snav').forEach(b=>b.onclick=()=>goAba(b.dataset.aba));
   $$('.ptab[data-frente]').forEach(b=>b.onclick=()=>goFrente(b.dataset.frente));
