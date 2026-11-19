@@ -463,6 +463,8 @@ async function pullRemoto(){
   // categorias de ração: backfill automático das rações antigas (uma categoria por nome)
   const podesync=!faltam.includes('racoes')&&!faltam.includes('racCats');
   migRacCats(podesync);
+  // pagamentos de fatura: liga cada pagamento à fatura certa (precisa da coluna faturaVenc)
+  migPagFaturas(!faltam.includes('lancamentos'));
   // migração: tabela remota vazia + dados locais → envia (e mantém os dados na tela)
   let migrou=false;
   for(const t of TABLES){
@@ -508,6 +510,15 @@ function migRacCats(pushOk){
     SB.upsert(c,'racCats',S.racCats.map(cleanRow)).catch(e=>console.warn('racCats',e));
     SB.upsert(c,'racoes',sem.map(cleanRow)).catch(e=>console.warn('racoes',e));}
   return true;}
+/* pagamentos de fatura: liga cada pagamento_cartao à fatura que ele quita (faturaVenc) — backfill pelo histórico */
+function migPagFaturas(pushOk){
+  const sem=S.lancamentos.filter(l=>l.tipo==='pagamento_cartao'&&l.cartaoId&&!l.faturaVenc);
+  if(!sem.length)return false;
+  for(const l of sem){const v=faturaVencDe(cartaoById(l.cartaoId),l.data);if(v)l.faturaVenc=v;}
+  const feitos=sem.filter(l=>l.faturaVenc);
+  if(feitos.length&&pushOk&&SB.cfg()){const c=SB.cfg();
+    SB.upsert(c,'lancamentos',feitos.map(cleanRow)).catch(e=>console.warn('lancamentos',e));}
+  return feitos.length>0;}
 const espBy=k=>ESPECIES.find(x=>x.k===k)||ESPECIES[0];
 function racaoDias(a,b){return Math.max(1,Math.round((parseISO(b).getTime()-parseISO(a).getTime())/864e5)+1);}
 function racaoFimEfetivo(r){return r.fim||todayISO();}
@@ -601,11 +612,8 @@ function totalPorCategoria(tipo,deISO,ateISO,filt){const map=new Map();
 function mesesPara(mk,n){const[y,m]=mk.split('-').map(Number);const out=[];for(let i=n-1;i>=0;i--){const d=new Date(y,m-1-i,1);out.push(d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'));}return out;}
 
 /* ---- faturas ---- */
-function faturaDeData(cartao,dataISO){
-  const F=clamp(+cartao.diaFechamento||1,1,31),V=clamp(+cartao.diaVencimento||10,1,31);
-  const d=parseISO(dataISO);
-  let anchor=new Date(d.getFullYear(),d.getMonth(),1);
-  if(d.getDate()>F)anchor=new Date(d.getFullYear(),d.getMonth()+1,1);
+function faturaDoAnchor(cartao,y,mo){const F=clamp(+cartao.diaFechamento||1,1,31),V=clamp(+cartao.diaVencimento||10,1,31);
+  const anchor=new Date(y,mo,1);
   const venc=new Date(anchor.getFullYear(),anchor.getMonth()+(V<=F?1:0),1);
   venc.setDate(Math.min(V,new Date(venc.getFullYear(),venc.getMonth()+1,0).getDate()));
   const fim=new Date(anchor.getFullYear(),anchor.getMonth()+1,0);
@@ -613,17 +621,39 @@ function faturaDeData(cartao,dataISO){
   const ini=new Date(anchor.getFullYear(),anchor.getMonth()-1,1);
   const lastPrev=new Date(anchor.getFullYear(),anchor.getMonth(),0).getDate();
   ini.setDate(Math.min(F+1,lastPrev));
-  return{ini:toISO(ini),fim:toISO(fim),venc:toISO(venc)};
-}
+  return{ini:toISO(ini),fim:toISO(fim),venc:toISO(venc)};}
+function faturaDeData(cartao,dataISO){const F=clamp(+cartao.diaFechamento||1,1,31);const d=parseISO(dataISO);
+  let am=d.getMonth();if(d.getDate()>F)am++;
+  return faturaDoAnchor(cartao,d.getFullYear(),am);}
+/* períodos por ciclo: [0] = em curso, [1] = a que acabou de fechar, ... */
+function faturasPeriodo(cartao,n=24){const F=clamp(+cartao.diaFechamento||1,1,31);const d=parseISO(todayISO());
+  let am=d.getMonth();if(d.getDate()>F)am++;
+  const out=[];for(let i=0;i<n;i++){const t=new Date(d.getFullYear(),am-i,1);out.push(faturaDoAnchor(cartao,t.getFullYear(),t.getMonth()));}
+  return out;}
 function itensFatura(cartao,per){return S.lancamentos.filter(l=>l.cartaoId===cartao.id&&l.tipo!=='pagamento_cartao'&&l.data>=per.ini&&l.data<=per.fim);}
+/* a fatura que um pagamento naquela data quita: a mais recente que fechou antes dele
+   (a fatura vira pagável no dia seguinte ao fechamento — como no banco) */
+function faturaVencDe(cartao,dataISO){const d=parseISO(dataISO);let best=null;
+  for(let i=0;i<36;i++){const t=new Date(d.getFullYear(),d.getMonth()+1-i,1);
+    const per=faturaDoAnchor(cartao,t.getFullYear(),t.getMonth());
+    if(per.fim<dataISO&&(!best||per.venc>best.venc))best=per;}
+  return best?best.venc:null;}
+function pagFaturaMatch(l,per){const v=l.faturaVenc||(l.cartaoId?faturaVencDe(cartaoById(l.cartaoId),l.data):null);return v===per.venc;}
+function faturaStatus(cartao,per){const itens=itensFatura(cartao,per);
+  const total=r2(itens.reduce((s,l)=>s+l.valor,0));
+  const pago=r2(S.lancamentos.filter(l=>l.cartaoId===cartao.id&&l.tipo==='pagamento_cartao'&&pagFaturaMatch(l,per)).reduce((s,l)=>s+l.valor,0));
+  const restante=r2(total-pago);const fechada=per.fim<todayISO();
+  const status=(total<=0&&pago<=0)?'vazia':fechada?(restante>0?'aberta':'paga'):'curso';
+  return{per,total,pago,restante,fechada,status,n:itens.length};}
+/* faturas já fechadas e ainda não quitadas (mais antigas primeiro) */
+function faturaPendentes(cartao){return faturasPeriodo(cartao,24).map(per=>faturaStatus(cartao,per)).filter(f=>f.status==='aberta');}
 function faturaAtual(cartao){if(cartaoBenef(cartao))return{per:faturaDeData(cartao,todayISO()),aberta:0,itens:[]};
   const per=faturaDeData(cartao,todayISO());const itens=itensFatura(cartao,per);
   return{per,aberta:r2(itens.reduce((s,l)=>s+l.valor,0)),itens};}
 function proximasFaturas(cartao,n=3){const out=[];let base=todayISO();
-  for(let i=0;i<n;i++){const f=faturaDeData(cartao,base);const itens=itensFatura(cartao,f);
-    const pagos=S.lancamentos.filter(l=>l.cartaoId===cartao.id&&l.tipo==='pagamento_cartao'&&l.data>=f.ini&&l.data<=f.fim).reduce((s,l)=>s+l.valor,0);
-    out.push({per:f,total:r2(itens.reduce((s,l)=>s+l.valor,0)),pago:r2(pagos),n:itens.length});
-    base=addDaysISO(f.fim,1);}
+  for(let i=0;i<n;i++){const st=faturaStatus(cartao,faturaDeData(cartao,base));
+    out.push({per:st.per,total:st.total,pago:st.pago,n:st.n});
+    base=addDaysISO(st.per.fim,1);}
   return out;}
 
 /* ---- projeção ---- */
@@ -638,7 +668,7 @@ function projecao(ateISO){
   const faturasPeriodo=[];
   for(const k of S.cartoes.filter(k=>!cartaoBenef(k))){let base=hoje;let guard=0;
     while(guard++<24){const f=faturaDeData(k,base);if(f.venc>ateISO)break;
-      const itens=itensFatura(k,f);const pagos=S.lancamentos.filter(l=>l.cartaoId===k.id&&l.tipo==='pagamento_cartao'&&l.data>=f.ini&&l.data<=f.fim).reduce((s,l)=>s+l.valor,0);
+      const itens=itensFatura(k,f);const pagos=S.lancamentos.filter(l=>l.cartaoId===k.id&&l.tipo==='pagamento_cartao'&&pagFaturaMatch(l,f)).reduce((s,l)=>s+l.valor,0);
       const total=r2(itens.reduce((s,l)=>s+l.valor,0));
       if(f.venc>hoje)faturasPeriodo.push({cartao:k,fat:f,total,pagado:r2(pagos),n:itens.length});
       base=addDaysISO(f.fim,1);}}
@@ -751,7 +781,12 @@ function kpi(classe,icon,lbl,val,sub){return `<div class="kpi ${classe}"><div cl
 function renderResumo(v){
   const t=totais(todayISO());const me=monthEndISO(todayISO());const fimMes=projecao(me);
   const mk=monthKey(todayISO());const mm=movMesConta(mk);
-  let prox=null;for(const k of S.cartoes){if(cartaoBenef(k))continue;const f=faturaAtual(k);if(f.aberta>0&&(!prox||f.per.venc<prox.venc))prox={venc:f.per.venc,nome:k.nome,valor:f.aberta};}
+  let prox=null;const pendAll=[];
+  for(const k of S.cartoes){if(cartaoBenef(k))continue;
+    for(const f of faturaPendentes(k))pendAll.push({k,f});}
+  if(pendAll.length){pendAll.sort((a,b)=>a.f.per.venc<b.f.per.venc?-1:1);
+    prox={venc:pendAll[0].f.per.venc,nome:pendAll[0].k.nome,valor:pendAll[0].f.restante,fechada:true,qtde:pendAll.length};}
+  else{for(const k of S.cartoes){if(cartaoBenef(k))continue;const f=faturaAtual(k);if(f.aberta>0&&(!prox||f.per.venc<prox.venc))prox={venc:f.per.venc,nome:k.nome,valor:f.aberta,fechada:false};}}
   const dl=prox?daysUntil(prox.venc):null;
   const catsItens=Array.from(totalPorCategoria('despesa',mk+'-01',monthEndISO(todayISO()),null).entries()).map(([id,v])=>{const c=catById(id);return{label:c?c.nome:'Sem categoria',cor:c?c.cor:'#8FA3AD',valor:v};}).sort((a,b)=>b.valor-a.valor);
   const ultimos=[...S.lancamentos].sort((a,b)=>b.data<a.data?-1:b.data>a.data?1:0).slice(0,5);
@@ -766,7 +801,7 @@ function renderResumo(v){
     ${(()=>{const nCred=S.cartoes.filter(k=>!cartaoBenef(k)).length;const sPre=saldoPrepagos(todayISO());
       return kpi('t-coral','💳','Dívida nos cartões (hoje)',brl(t.divida),`${nCred} cartão${nCred===1?'':'es'} de crédito${S.cartoes.some(cartaoBenef)?` · 🍽️ ${brl(sPre)} em pré-pagos`:''}`);})()}
     ${kpi('t-green','⚖️','Saldo líquido previsto',brl(fimMes.liquido),'no fim de '+MESES_FULL[parseISO(me).getMonth()])}
-    ${prox?kpi('t-amber','🔜','Próxima fatura a vencer',brl(prox.valor),`${esc(prox.nome)} · vence ${fmtData(prox.venc)} · ${dl<=0?'vence hoje':dl===1?'vence amanhã':`faltam ${dl} dias`}`):kpi('t-amber','🔜','Próxima fatura a vencer','—','sem faturas em aberto')}
+    ${prox?kpi('t-amber',prox.fechada?'⚠️':'🔜',prox.fechada?'Fatura fechada a pagar':'Próxima fatura a vencer',brl(prox.valor),`${esc(prox.nome)} · ${prox.fechada?`fechada${prox.qtde>1?` (+${prox.qtde-1} mais antigas)`:''} · pague até ${fmtData(prox.venc)}`:`vence ${fmtData(prox.venc)} · ${dl<=0?'vence hoje':dl===1?'vence amanhã':`faltam ${dl} dias`}`}`):kpi('t-amber','🔜','Próxima fatura a vencer','—','sem faturas em aberto')}
   </div>
   <div class="cols" style="margin-top:16px">
     <div style="display:flex;flex-direction:column;gap:16px;min-width:0">
@@ -789,11 +824,12 @@ function renderResumo(v){
             <span><b style="font-size:.9rem">🍽️ ${esc(k.nome)}</b><br><span class="muted">pré-pago · saldo hoje</span></span>
             <span style="text-align:right"><b class="${s<0?'vneg':'vpos'}" style="font-size:.95rem">${brl(s)}</b><br>
             <span class="diasbadge dias-ok">alimentação</span></span></div>`;}
-          const f=faturaAtual(k);const d=daysUntil(f.per.venc);
+          const pendK=[...faturaPendentes(k)].sort((a,b)=>a.per.venc<b.per.venc?-1:1);
+          const f=faturaAtual(k);const ref=pendK[0]||{per:f.per,restante:f.aberta};const d=daysUntil(ref.per.venc);
           return `<div class="li" style="display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px dashed var(--line-soft)">
-            <span><b style="font-size:.9rem">${esc(k.nome)}</b><br><span class="muted">vence ${fmtData(f.per.venc)}</span></span>
-            <span style="text-align:right"><b class="${f.aberta>0?'vneg':''}" style="font-size:.95rem">${brl(f.aberta)}</b><br>
-            <span class="diasbadge ${d<0?'dias-pass':d<=5?'dias-urge':d<=12?'dias-alert':'dias-ok'}">${d<0?'atrasado':d===0?'hoje':d+' dias'}</span></span></div>`;}).join(''):`<div class="empty" style="padding:16px"><span class="em">💳</span><b>Nenhum cartão cadastrado</b><button class="btn btn-sm btn-soft" data-aba-link="cartoes">cadastrar cartão</button></div>`}
+            <span><b style="font-size:.9rem">${pendK.length?'⚠️ ':''}${esc(k.nome)}</b><br><span class="muted">${pendK.length?`fatura fechada em aberto · fechou ${fmtDataCurta(pendK[0].per.fim)}`:`vence ${fmtData(f.per.venc)}`}</span></span>
+            <span style="text-align:right"><b class="${ref.restante>0?'vneg':''}" style="font-size:.95rem">${brl(ref.restante)}</b><br>
+            <span class="diasbadge ${pendK.length?'dias-urge':d<0?'dias-pass':d<=5?'dias-urge':d<=12?'dias-alert':'dias-ok'}">${pendK.length?'pagar':d<0?'atrasado':d===0?'hoje':d+' dias'}</span></span></div>`;}).join(''):`<div class="empty" style="padding:16px"><span class="em">💳</span><b>Nenhum cartão cadastrado</b><button class="btn btn-sm btn-soft" data-aba-link="cartoes">cadastrar cartão</button></div>`}
       </div>
       <div class="card"><div class="card-h"><h3>🕘 Últimos lançamentos</h3><div class="right"><button class="btn btn-sm btn-ghost" data-aba-link="lancamentos">ver todos</button></div></div>
         ${ultimos.length?`<div class="lan-list">${ultimos.map(lanRow).join('')}</div>`:`<div class="empty" style="padding:16px"><span class="em">🧾</span><b>Nada lançado ainda</b></div>`}
@@ -982,8 +1018,10 @@ function cartaoCardHTML(k){
       </div>
     </div>
   </div>`;}
-  const f=faturaAtual(k);const divida=dividaCartao(k.id,todayISO());
-  const d=daysUntil(f.per.venc);const prox=proximasFaturas(k,1)[0];
+  const pend=[...faturaPendentes(k)].sort((a,b)=>a.per.venc<b.per.venc?-1:1);
+  const curso=faturaAtual(k);const divida=dividaCartao(k.id,todayISO());
+  const ref=pend[0]||{per:curso.per,restante:curso.aberta};
+  const d=daysUntil(ref.per.venc);const prox=proximasFaturas(k,1)[0];
   return `<div class="ccard-wrap">
     <div class="ccard" style="${cardGrad(k.cor||'#5C93A6')}">
       <div class="glow"></div><div class="glow2"></div>
@@ -993,12 +1031,14 @@ function cartaoCardHTML(k){
       <div class="row2"><span>fecha dia <b>${k.diaFechamento}</b></span><span>vence dia <b>${k.diaVencimento}</b></span>${k.limite?`<span>limite <b>${brl(k.limite)}</b></span>`:''}</div>
     </div>
     <div class="ccard-info">
-      <div class="li"><span class="muted">Fatura atual (em aberto)</span><b class="${f.aberta>0?'vneg':''}">${brl(f.aberta)}</b></div>
-      <div class="li"><span class="muted">Vencimento</span><b>${fmtData(f.per.venc)} <span class="diasbadge ${d<0?'dias-pass':d<=5?'dias-urge':d<=12?'dias-alert':'dias-ok'}">${d<0?'venceu':d===0?'hoje':d+' dias'}</span></b></div>
-      <div class="li"><span class="muted">Próximo ciclo · ${fmtDataCurta(prox.per.ini)}–${fmtDataCurta(prox.per.fim)}</span><b>${brl(prox.total)}</b></div>
+      ${pend.length?`<div class="li"><span class="muted">⚠️ Fatura fechada em aberto${pend.length>1?` (+${pend.length-1} mais antigas)`:''}</span><b class="vneg">${brl(r2(pend.reduce((s,f)=>s+f.restante,0)))} <span class="diasbadge dias-urge">fechou ${fmtDataCurta(pend[0].per.fim)}</span></b></div>`
+      :`<div class="li"><span class="muted">Fatura em curso (fecha ${fmtDataCurta(curso.per.fim)})</span><b class="${curso.aberta>0?'vneg':''}">${brl(curso.aberta)}</b></div>`}
+      <div class="li"><span class="muted">${pend.length?'Pague antes de':'Vencimento'}</span><b>${fmtData(ref.per.venc)} <span class="diasbadge ${d<0?'dias-pass':d<=5?'dias-urge':d<=12?'dias-alert':'dias-ok'}">${d<0?'venceu':d===0?'hoje':d+' dias'}</span></b></div>
+      ${pend.length?`<div class="li"><span class="muted">Fatura em curso (fecha ${fmtDataCurta(curso.per.fim)})</span><b class="${curso.aberta>0?'vneg':''}">${brl(curso.aberta)}</b></div>`
+      :`<div class="li"><span class="muted">Próximo ciclo · ${fmtDataCurta(prox.per.ini)}–${fmtDataCurta(prox.per.fim)}</span><b>${brl(prox.total)}</b></div>`}
       <div class="li"><span class="muted">Dívida total do cartão</span><b class="${divida>0?'vneg':''}">${brl(divida)}</b></div>
       <div style="display:flex;gap:7px;margin-top:10px;flex-wrap:wrap">
-        <button class="btn btn-sm btn-primary" data-paycartao="${k.id}">${ic('check')} Pagar fatura</button>
+        <button class="btn btn-sm btn-primary" data-paycartao="${k.id}">${ic('check')} Pagar fatura${pend.length?' fechada':''}</button>
         <button class="iconbtn" data-editcartao="${k.id}" title="Editar" style="border:1px solid var(--line)">${ic('pencil')}</button>
         <button class="iconbtn del" data-delcartao="${k.id}" title="Excluir" style="border:1px solid var(--line)">${ic('trash')}</button>
       </div>
@@ -1783,9 +1823,15 @@ function formLancamento(l,pre){
         <select class="input" id="fCartao">${S.cartoes.filter(cartaoBenef).map(k=>`<option value="${k.id}" ${(l?l.cartaoId:(pre&&pre.cartaoId))===k.id?'selected':''}>${esc(k.nome)}</option>`).join('')}</select>
         <div class="note" style="margin-top:8px">A carga aumenta o saldo do cartão de alimentação — não passa por conta nenhuma.</div></div>`;
     }else if(curTipo==='pagamento_cartao'){
+      const idSel=(l?l.cartaoId:(pre&&pre.cartaoId))||(S.cartoes[0]&&S.cartoes[0].id);
+      const kk=cartaoById(idSel);
+      const pends=kk?[...faturaPendentes(kk)].sort((a,b)=>a.per.venc<b.per.venc?-1:1):[];
       origemHTML=`<div class="frow">
         <div class="field"><label>💳 Cartão da fatura</label><select class="input" id="fCartao">${S.cartoes.map(k=>`<option value="${k.id}" ${l?l.cartaoId===k.id:(pre&&pre.cartaoId)===k.id?'selected':''}>${esc(k.nome)}</option>`).join('')}</select></div>
-        <div class="field"><label>🏦 Pagar com a conta</label><select class="input" id="fConta">${S.contas.map(c=>`<option value="${c.id}" ${l?l.contaId===c.id:(pre&&pre.contaId)===c.id?'selected':''}>${esc(c.nome)}</option>`).join('')}</select></div></div>`;
+        <div class="field"><label>🏦 Pagar com a conta</label><select class="input" id="fConta">${S.contas.map(c=>`<option value="${c.id}" ${l?l.contaId===c.id:(pre&&pre.contaId)===c.id?'selected':''}>${esc(c.nome)}</option>`).join('')}</select></div></div>
+        <div class="field"><label>🏷️ Qual fatura <span class="opt">(fica anotado no lançamento)</span></label>
+        <select class="input" id="fFatura"><option value="">automática — a mais recente que fecha até a data${pends.length?` (recomendado: a fechada ${fmtDataCurta(pends[0].per.fim)})`:''}</option>${pends.map(f=>`<option value="${f.per.venc}" ${l&&l.faturaVenc===f.per.venc?'selected':''}>fechada ${fmtDataCurta(f.per.fim)} · vence ${fmtData(f.per.venc)} — ${brl(f.restante)}</option>`).join('')}${l&&l.faturaVenc&&!pends.some(f=>f.per.venc===l.faturaVenc)?`<option value="${l.faturaVenc}" selected>vence ${fmtData(l.faturaVenc)} (atual)</option>`:''}</select>
+        <div class="hint" style="margin-top:6px">Assim o pagamento fica ligado à fatura que ele quita — um pagamento depois do fechamento não cai na fatura errada.</div></div>`;
     }else if(curTipo==='despesa'){
       origemHTML=`<div class="field"><label>Onde saiu?</label><div class="seg" id="segOrigem">
         <button type="button" data-o="conta" class="${curOrigem==='conta'?'on':''}">🏦 Conta</button>
@@ -1836,7 +1882,9 @@ function formLancamento(l,pre){
     if(curTipo==='pagamento_cartao'){const k=document.getElementById('fCartao').value,c=document.getElementById('fConta').value;
       if(!k||!S.cartoes.some(x=>x.id===k)){toast('Escolha o cartão da fatura','err');return;}
       if(!c){toast('Escolha a conta do pagamento','err');return;}
-      base.cartaoId=k;base.contaId=c;base.descricao=desc||`Pagamento fatura ${cartaoById(k).nome}`;}
+      base.cartaoId=k;base.contaId=c;base.descricao=desc||`Pagamento fatura ${cartaoById(k).nome}`;
+      const fsel=document.getElementById('fFatura');
+      base.faturaVenc=fsel&&fsel.value?fsel.value:faturaVencDe(cartaoById(k),base.data)||null;}
     else if(curTipo==='carga_cartao'){const k=document.getElementById('fCartao')?document.getElementById('fCartao').value:'';
       if(!k||!S.cartoes.some(x=>x.id===k)){toast('Escolha o cartão','err');return;}
       base.cartaoId=k;base.contaId=null;base.descricao=desc||`Carga ${cartaoById(k).nome}`;}
@@ -1867,19 +1915,32 @@ function pagamentoDesc(tipo,cartaoId,data){return tipo==='pagamento_cartao'&&car
 
 /* ============ FORM PAGAMENTO RÁPIDO ============ */
 function formPagamento(k){
-  if(!k)return;const f=faturaAtual(k);
+  if(!k)return;
+  const pend=[...faturaPendentes(k)].sort((a,b)=>a.per.venc<b.per.venc?-1:1);
+  const curso=faturaAtual(k);
+  const opts=pend.map(f=>({v:'v:'+f.per.venc,rest:f.restante,
+    label:`Fatura fechada ${fmtDataCurta(f.per.fim)} · vence ${fmtData(f.per.venc)} — ${brl(f.restante)} em aberto${f.pago>0?` (de ${brl(f.total)})`:''}`}));
+  if(!opts.length&&curso.aberta>0)opts.push({v:'c',rest:curso.aberta,label:`Fatura em curso (fecha ${fmtData(curso.per.fim)}) — ${brl(curso.aberta)} até agora`});
+  const temFat=opts.length>0;
   openModal(`<div class="modal-h"><h2>💳 Pagar fatura · ${esc(k.nome)}</h2><button class="iconbtn" onclick="closeModal()">${ic('x')}</button></div>
-  <div class="note tealnote" style="margin-bottom:14px">Fatura em aberto: <b>${brl(f.aberta)}</b> (vence ${fmtData(f.per.venc)}). O valor sai da conta escolhida e reduz a dívida do cartão.</div>
+  ${pend.length?`<div class="note tealnote" style="margin-bottom:14px">Tem <b>${pend.length} fatura${pend.length>1?'s':''} fechada${pend.length>1?'s':''} em aberto</b> — comece pela mais antiga. O valor sai da conta escolhida e reduz a dívida do cartão.</div>`
+  :`<div class="note" style="margin-bottom:14px">${curso.aberta>0?`Nenhuma fatura fechada em aberto — a fatura em curso (${brl(curso.aberta)}) fecha em <b>${fmtData(curso.per.fim)}</b> e fica pronta para pagamento no dia seguinte.`:'As faturas estão em dia — nada a pagar.'}</div>`}
+  ${temFat?`<div class="field"><label>Qual fatura</label><select class="input" id="pFat">${opts.map(o=>`<option value="${o.v}">${o.label}</option>`).join('')}</select></div>
   <div class="frow">
-    <div class="field"><label>Valor (R$)</label><input class="input" id="pValor" inputmode="decimal" value="${String(f.aberta).replace('.',',')}"></div>
+    <div class="field"><label>Valor (R$)</label><input class="input" id="pValor" inputmode="decimal" value="${String(opts[0].rest).replace('.',',')}"></div>
     <div class="field"><label>Data</label><input type="date" class="input" id="pData" value="${todayISO()}"></div>
   </div>
-  <div class="field"><label>🏦 Pagar com a conta</label><select class="input" id="pConta"><option value="">— escolher —</option>${contaOptions()}</select></div>
-  <div class="modal-f"><button class="btn btn-ghost" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" id="pSalvar">${ic('check')} Registrar pagamento</button></div>`);
+  <div class="field"><label>🏦 Pagar com a conta</label><select class="input" id="pConta"><option value="">— escolher —</option>${contaOptions()}</select></div>`
+  :''}
+  <div class="modal-f"><button class="btn btn-ghost" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" id="pSalvar" ${temFat?'':'disabled style="opacity:.5;pointer-events:none"'}>${ic('check')} Registrar pagamento</button></div>`);
+  const sel=document.getElementById('pFat');
+  if(sel)sel.onchange=()=>{const o=opts.find(x=>x.v===sel.value);const p=document.getElementById('pValor');if(o&&p)p.value=String(o.rest).replace('.',',');};
   document.getElementById('pSalvar').onclick=()=>{
     const valor=num(document.getElementById('pValor').value);const data=document.getElementById('pData').value;const conta=document.getElementById('pConta').value;
     if(!(valor>0)){toast('Informe o valor','err');return;}if(!conta){toast('Escolha a conta','err');return;}
-    addLocal('lancamentos',{id:uid(),criadoEm:new Date().toISOString(),data,valor:r2(valor),tipo:'pagamento_cartao',cartaoId:k.id,contaId:conta,categoriaId:catSistemaCartoes(),descricao:`Pagamento fatura ${k.nome}`,titular:k.titular||'',pago:true,observacoes:`fatura ${fmtDataCurta(f.per.ini)}–${fmtDataCurta(f.per.fim)}`});
+    const fvenc=sel?(sel.value.startsWith('v:')?sel.value.slice(2):faturaVencDe(k,data)):null;
+    const per=fvenc?(faturasPeriodo(k,36).find(p=>p.venc===fvenc)||curso.per):curso.per;
+    addLocal('lancamentos',{id:uid(),criadoEm:new Date().toISOString(),data,valor:r2(valor),tipo:'pagamento_cartao',cartaoId:k.id,contaId:conta,categoriaId:catSistemaCartoes(),descricao:`Pagamento fatura ${k.nome}`,titular:k.titular||'',pago:true,faturaVenc:fvenc||faturaVencDe(k,data)||null,observacoes:`fatura ${fmtDataCurta(per.ini)}–${fmtDataCurta(per.fim)}${per.venc!==curso.per.venc?` · vence ${fmtDataCurta(per.venc)}`:''}`});
     toast('✅ Pagamento registrado','ok');closeModal();render();};
 }
 
@@ -2030,7 +2091,7 @@ create table if not exists lancamentos (
   valor numeric default 0, tipo text default 'despesa',
   "contaId" uuid, "cartaoId" uuid, "categoriaId" uuid, titular text default '',
   pago boolean default true, observacoes text default '', grupo text,
-  "criadoEm" timestamptz default now());
+  "faturaVenc" text, "criadoEm" timestamptz default now());
 
 create table if not exists racoes (
   id uuid primary key, nome text not null, especie text default 'gatos',
@@ -2075,10 +2136,11 @@ do $$ begin create policy "anon total supItens" on "supItens" for all to anon us
 do $$ begin create policy "anon total supCompras" on "supCompras" for all to anon using (true) with check (true); exception when duplicate_object then null; end $$;`;
 
 /* para quem já criou as tabelas antes das atualizações (pré-pagos, rações+categorias, suprimentos) */
-const SQL_MIGRA=`-- Mar Aberto · atualizações: cartões pré-pagos + abas Rações, Suprimentos e categorias de ração
+const SQL_MIGRA=`-- Mar Aberto · atualizações: cartões pré-pagos + Rações, Suprimentos, categorias e faturas pagáveis
 -- Roda sem problema mesmo se as colunas/tabelas já existirem.
 alter table cartoes add column if not exists tipo text default 'credito';
 alter table cartoes add column if not exists "saldoInicial" numeric default 0;
+alter table lancamentos add column if not exists "faturaVenc" text;
 
 create table if not exists racoes (
   id uuid primary key, nome text not null, especie text default 'gatos',
@@ -2189,7 +2251,7 @@ function formConfig(){
       if(await confirmAcao('Restaurar backup?',`Vai substituir os dados atuais por: <b>${(d.contas||[]).length} contas · ${(d.cartoes||[]).length} cartões · ${(d.categorias||[]).length} categorias · ${(d.lancamentos||[]).length} lançamentos · ${(d.racoes||[]).length} rações · ${(d.supItens||[]).length} itens de casa</b>.`,'Restaurar')){
         S.contas=d.contas||[];S.cartoes=d.cartoes||[];S.categorias=d.categorias||[];S.lancamentos=d.lancamentos||[];S.racoes=d.racoes||[];
         S.racCats=d.racCats||[];S.supCats=d.supCats||[];S.supItens=d.supItens||[];S.supCompras=d.supCompras||[];
-        if(d.settings)S.settings=Object.assign(S.settings,d.settings);persistLocal();migRacCats(false);
+        if(d.settings)S.settings=Object.assign(S.settings,d.settings);persistLocal();migRacCats(false);migPagFaturas(false);
         const c=SB.cfg();if(c){toast('Enviando ao Supabase…');for(const t of TABLES)await SB.upsert(c,t,(S[t]||[]).map(cleanRow));}
         toast('✅ Backup restaurado','ok');closeModal();render();}}catch(err){toast('Arquivo inválido: '+err.message,'err');}};
     rd.readAsText(f);};
@@ -2263,6 +2325,7 @@ function init(){
   if(!S.categorias.length&&!SB.cfg())seedCategorias();
   seedSupCats();
   migRacCats(false);
+  migPagFaturas(false);
   renderBrand();
   $$('.snav').forEach(b=>b.onclick=()=>goAba(b.dataset.aba));
   $$('.ptab[data-frente]').forEach(b=>b.onclick=()=>goFrente(b.dataset.frente));
